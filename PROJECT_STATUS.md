@@ -23,12 +23,17 @@ copied into either MIT project.
 ## Repository and branch state
 
 - SDK checkout: `ttlock-ble`, branch `codex/passage-mode`, original repository
-  configured as the `upstream` remote.
+  configured as the fetch-only `upstream` remote and
+  [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
   `codex/management-actions`, original repository configured as the `upstream`
-  remote.
-- GitHub forks and `origin` remotes are pending because the available GitHub
-  browser session is not signed in. No changes have been pushed upstream.
+  fetch-only remote and
+  [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
+  `origin`.
+- Both feature branches are pushed to their forks and tracked locally. Draft
+  PRs [SDK #1](https://github.com/danoev/ttlock-ble/pull/1) and
+  [HA #1](https://github.com/danoev/ha-ttlock-ble/pull/1) exist only to run
+  hosted checks; neither fork default branch nor either upstream is modified.
 - The upstream Git history is preserved and the work is split into small
   protocol, integration, and documentation commits.
 
@@ -75,11 +80,22 @@ Current local branches:
 - `manifest.json`, `hacs.json`, translation JSON, and `services.yaml` parse;
   the manifest and project versions agree.
 
-HACS validation, hassfest, and repository workflows still need to run in
-GitHub Actions after the fork branches are pushed. A local Home Assistant
-`check_config` run is not a faithful gate in this workspace because Home
-Assistant's internal dependency command splits the workspace path containing
-spaces; this is an environment limitation, not a passing validation claim.
+Hosted validation on the draft PRs passes:
+
+- SDK: Ruff, strict mypy, pytest, and CodeQL.
+- Home Assistant: Ruff, mypy, pytest, version consistency, hassfest, HACS, and
+  CodeQL.
+
+The first HACS run identified fork metadata defaults rather than source
+errors: the new fork had no topics and Issues were disabled. The fork now has
+the same HACS topics as upstream and Issues enabled; the unchanged HACS job
+passes on rerun. The integration code/layout, manifest, and `hacs.json` checks
+all pass.
+
+A local Home Assistant `check_config` run is not a faithful gate in this
+workspace because Home Assistant's internal dependency command splits the
+workspace path containing spaces; this is an environment limitation, not a
+passing validation claim.
 
 ## Known-working locks
 
@@ -120,13 +136,8 @@ request/result evidence.
 
 ## Next milestone
 
-1. Sign in to GitHub, create the two account forks, add `origin` remotes, and
-   push the feature branches.
-2. Run HACS validation, hassfest, and both repositories' full GitHub Actions
-   workflows without weakening any checks.
-3. Install the HA branch in the user's test Home Assistant environment and run
+1. Install the HA branch in the user's test Home Assistant environment and run
    the baseline plus passcode/auto-lock portions of the hardware checklist.
-4. Capture capability bytes and sanitized passage-mode responses, convert them
+2. Capture capability bytes and sanitized passage-mode responses, convert them
    into reusable SDK fixtures, refine the protocol if required, and only then
    expose capability-gated passage-mode actions in Home Assistant.
-
