@@ -21,11 +21,13 @@ from typing import TYPE_CHECKING
 from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from ttlock_ble import TTLockClient, TTLockError
+from ttlock_ble import KeyboardPwdType, TTLockClient, TTLockError
 
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from bleak import BleakClient
     from homeassistant.core import HomeAssistant
 
@@ -152,6 +154,58 @@ class TtlockBleConnection:
         """Send an UNLOCK command on the live connection (raises on failure)."""
         await self._async_run_command("unlock")
 
+    async def async_get_auto_lock_time(self) -> int:
+        """Read the native auto-lock delay from the lock."""
+        return await self._async_run_management_command(
+            "read auto-lock delay",
+            lambda client: client.get_auto_lock_time(),
+        )
+
+    async def async_set_auto_lock_time(self, seconds: int) -> None:
+        """Set the native auto-lock delay; zero disables it."""
+        await self._async_run_management_command(
+            "set auto-lock delay",
+            lambda client: client.set_auto_lock_time(seconds),
+        )
+
+    async def async_add_passcode(
+        self,
+        code: str,
+        *,
+        pwd_type: KeyboardPwdType,
+        start_date: str,
+        end_date: str,
+    ) -> None:
+        """Add a permanent or time-windowed keypad passcode."""
+        await self._async_run_management_command(
+            "add passcode",
+            lambda client: client.add_passcode(
+                code,
+                pwd_type=pwd_type,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+        )
+
+    async def async_delete_passcode(
+        self,
+        code: str,
+        *,
+        pwd_type: KeyboardPwdType,
+    ) -> None:
+        """Delete one keypad passcode without retaining it locally."""
+        await self._async_run_management_command(
+            "delete passcode",
+            lambda client: client.delete_passcode(code, pwd_type=pwd_type),
+        )
+
+    async def async_clear_passcodes(self) -> None:
+        """Remove every keypad passcode from the lock."""
+        await self._async_run_management_command(
+            "clear passcodes",
+            lambda client: client.clear_passcodes(),
+        )
+
     async def async_get_operation_log(self) -> list[LogEntry]:
         """
         Fetch operation records from the lock and dispatch the new ones.
@@ -257,6 +311,31 @@ class TtlockBleConnection:
             except Exception as exc:
                 await self._async_disconnect_locked()
                 msg = f"Lock {self._key.lockMac} failed to {action}: {exc}"
+                raise TTLockError(msg) from exc
+
+    async def _async_run_management_command[T](
+        self,
+        action: str,
+        operation: Callable[[TTLockClient], Awaitable[T]],
+    ) -> T:
+        """Run management without including its secret inputs in errors."""
+        async with self._lock:
+            client = await self._async_ensure_connected_locked()
+            if client is None:
+                msg = f"Lock {self._key.lockMac} is not reachable via Bluetooth"
+                raise TTLockError(msg)
+            try:
+                return await operation(client)
+            except TTLockError:
+                await self._async_disconnect_locked()
+                raise
+            except TimeoutError as exc:
+                await self._async_disconnect_locked()
+                msg = f"Lock {self._key.lockMac} timed out during {action}"
+                raise TTLockError(msg) from exc
+            except Exception as exc:
+                await self._async_disconnect_locked()
+                msg = f"Lock {self._key.lockMac} failed to {action}"
                 raise TTLockError(msg) from exc
 
     async def _async_ensure_connected_locked(self) -> TTLockClient | None:

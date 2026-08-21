@@ -110,6 +110,26 @@
       }
     }
   },
+  "exceptions": {
+    "device_not_found": {
+      "message": "The selected TTLock device no longer exists."
+    },
+    "device_not_loaded": {
+      "message": "The selected TTLock device is not loaded."
+    },
+    "invalid_passcode": {
+      "message": "The passcode must contain 4-9 digits."
+    },
+    "invalid_datetime": {
+      "message": "Enter a valid date and time."
+    },
+    "period_window_required": {
+      "message": "Period passcodes require both a start and an end."
+    },
+    "invalid_period_window": {
+      "message": "The passcode end must be after its start."
+    }
+  },
   "entity": {
     "binary_sensor": {
       "connection": {

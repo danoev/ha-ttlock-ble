@@ -29,10 +29,12 @@ from .const import (
 )
 from .coordinator import TtlockBleDataUpdateCoordinator
 from .data import TtlockBleData
+from .services import async_setup_services
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.device_registry import DeviceEntry
+    from homeassistant.helpers.typing import ConfigType
 
     from .data import (
         TtlockBleConfigData,
@@ -46,6 +48,12 @@ PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.SENSOR,
 ]
+
+
+async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
+    """Register integration-wide local management actions."""
+    await async_setup_services(hass)
+    return True
 
 
 def _configured_macs(config: TtlockBleConfigData) -> set[str]:
