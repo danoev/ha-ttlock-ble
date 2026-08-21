@@ -1,93 +1,219 @@
-# Real-lock validation checklist
+# Real-lock hardware-validation runbook
 
-Use a disposable test PIN that has never protected the door. Do not paste AES
-keys, unlock keys, administrator PINs, account passwords, or active door codes
-into an issue or shared log.
+This runbook is for the `3.5.1rc1` prerelease only. It is a hardware
+validation build, not production-certified. It deliberately uses released
+`ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
+isolated on the SDK development branch.
 
-## Test environment record
+Use disposable PINs that have never protected the door. Keep a mechanical key
+or another verified recovery route available. Do not run `clear_passcodes`,
+change an administrator code, factory-reset, or unpair the lock in the initial
+session.
 
-Record these non-secret facts with every result:
+## Evidence and safe logging
+
+Record the following non-secret facts once:
 
 - Home Assistant version and installation type
-- integration commit and SDK commit/version
+- integration version, commit and SDK version (`ttlock-ble==0.1.11`)
 - lock make/model and firmware/protocol version
 - direct Bluetooth adapter or ESPHome proxy name/version
-- approximate RSSI and distance
-- whether the same operation succeeds in the TTLock app
+- approximate RSSI, distance and whether the TTLock app succeeds
+- local time zone and the lock's apparent wall-clock accuracy
 
-## 1. Baseline local operation
+Use this temporary Home Assistant logger configuration:
 
-1. Restart Home Assistant and confirm the device and four baseline entities load.
-2. Confirm passive advertisements update lock state and battery without opening a
-   BLE connection.
-3. Lock and unlock once from Home Assistant.
-4. Lock and unlock once outside Home Assistant (keypad/app/mechanical control)
-   and confirm the advertisement or event corrects the entity.
-5. Repeat through an ESPHome active Bluetooth Proxy.
+```yaml
+logger:
+  default: warning
+  logs:
+    custom_components.ttlock_ble: debug
+```
 
-Expected: no TTLock gateway or phone is required after key bootstrap; a proxy
-path is selected by Home Assistant and command failures do not leave an
-optimistic state behind.
+Do **not** enable `ttlock_ble.client` at debug level in this build. Released SDK
+0.1.11 can log raw encrypted BLE frames and decrypted response bytes. The
+integration namespace is sufficient for connection route, proxy, RSSI,
+advertisement and action-failure evidence. Restart Home Assistant after adding
+the configuration and remove it after the session.
 
-## 2. Auto-lock
+For each step, record timestamp, transport route, entity state before/after,
+expected result, actual result, elapsed time and pass/fail. Record only a
+numeric/hex status code from an error; never copy the PIN, administrator PIN,
+account email/password, AES key, unlock key, full diagnostics archive, or raw
+BLE payload into shared evidence. Search exported logs for every secret before
+sharing and redact the entire matching line. Home Assistant script/automation
+YAML and traces can retain values entered there, so do not share them and
+delete disposable traces/scripts when finished.
 
-1. Call `ttlock_ble.get_auto_lock` and record the returned delay.
-2. Set a short, safe delay and read it back.
-3. Unlock and confirm the lock re-locks once at that delay.
-4. Set `seconds: 0`, read it back, and verify whether this firmware really
-   disables auto-lock.
-5. Restore the original value before ending the test.
+Replace `LOCK_DEVICE_ID`, `lock.front_door`, `DISPOSABLE_PIN` and timestamps in
+the examples. Run action YAML from Developer Tools > Actions. The response from
+`get_auto_lock` is also shown in that panel; in a script it can be captured as:
 
-Capture the status/error code only when rejected; do not capture encrypted key
-material.
+```yaml
+sequence:
+  - action: ttlock_ble.get_auto_lock
+    data:
+      device_id: LOCK_DEVICE_ID
+    response_variable: auto_lock_result
+```
 
-## 3. Passcodes
+## Initial sequence
 
-Use a new disposable PIN for each test:
+### A. Eight-step baseline
 
-1. Add a permanent PIN, unlock once, delete it, and confirm it no longer works.
-2. Add a period PIN whose start is five minutes in the future and end is ten
-   minutes later. Confirm rejection before start, success inside the window,
-   and rejection after expiry.
-3. Run `clear_passcodes` only on a lock where removing every keypad credential
-   is acceptable and recovery through the administrator/app has been verified.
+1. Restart Home Assistant; confirm the TTLock device and its lock, battery,
+   connection and event entities load without repair/config errors.
+2. Record the lock entity state and battery while the lock is idle.
+3. Operate the lock physically; confirm passive BLE advertisements correct the
+   entity state/battery without Home Assistant opening a command connection.
+4. Lock from Home Assistant:
 
-Expected: submitted PINs are absent from integration logs, diagnostics, entity
-attributes, and event data. Home Assistant automation YAML/traces may still
-contain values that the user placed there.
+   ```yaml
+   action: lock.lock
+   target:
+     entity_id: lock.front_door
+   ```
 
-## 4. Capability and passage-mode SDK branch
+5. Unlock from Home Assistant:
 
-With the `codex/passage-mode` SDK branch installed in a development environment:
+   ```yaml
+   action: lock.unlock
+   target:
+     entity_id: lock.front_door
+   ```
 
-1. Read the device-feature mask and record only the hexadecimal mask plus the
-   derived booleans.
-2. Query passage schedules before mutation and retain the decoded non-secret
-   schedule list.
-3. Add one short weekly interval for the current weekday.
-4. Query again and confirm the exact interval is present.
-5. Unlock during the interval and verify native passage behaviour survives
-   without repeated Home Assistant unlock calls.
-6. Delete the exact interval and confirm normal auto-lock behaviour returns.
-7. Test `clear_passage_modes` only after individual delete succeeds.
+6. Lock and unlock once by a normal existing method outside Home Assistant;
+   confirm the entity corrects after each operation and no optimistic state is
+   left behind.
+7. Repeat steps 4 and 5 through the directly connected Bluetooth adapter and
+   record connection route, latency and result.
+8. Repeat steps 4 and 5 through the ESPHome active Bluetooth Proxy and record
+   proxy, RSSI, latency and result. If either transport is unavailable, mark
+   that step not run rather than passed.
 
-Do not claim passage support for the model until add, query, behaviour, and
-delete all pass on the physical lock.
+Stop if baseline lock/unlock or state reconciliation is unreliable.
 
-## 5. Safe diagnostic capture
+### B. Auto-lock read, set, disable and restore
 
-Enable debug logging only for `custom_components.ttlock_ble` and
-`ttlock_ble.client`. Before sharing, search the exported text for the test PIN,
-account email, AES key, unlock key, and administrator PIN. Redact the entire
-line if any appears.
+1. Read the current delay and record it as `ORIGINAL_SECONDS`:
 
-Useful safe artifacts are:
+   ```yaml
+   action: ttlock_ble.get_auto_lock
+   data:
+     device_id: LOCK_DEVICE_ID
+   ```
 
-- non-secret lock model/protocol fields
-- advertisement manufacturer data
-- GATT service/characteristic UUIDs
-- command opcode, response status, payload length, and timing
-- capability mask
-- decoded passage schedule fields
+2. Set a short safe delay, for example 15 seconds:
 
-Turn debug logging off after the test.
+   ```yaml
+   action: ttlock_ble.set_auto_lock
+   data:
+     device_id: LOCK_DEVICE_ID
+     seconds: 15
+   ```
+
+3. Read it back with `ttlock_ble.get_auto_lock`; require `seconds: 15`.
+4. Unlock once and physically confirm one native re-lock near the configured
+   delay; confirm Home Assistant returns to locked.
+5. Only while the door can safely remain unlocked, set `seconds: 0`, read it
+   back, then unlock and wait longer than the prior delay. Treat anything other
+   than an explicit zero plus no native re-lock as unsupported, not as success.
+6. In a `finally`-style safety step, restore `ORIGINAL_SECONDS`, read it back,
+   and physically verify normal auto-lock behaviour. Restore it even if any
+   earlier assertion failed.
+
+Set and restore use the same action with different seconds:
+
+```yaml
+action: ttlock_ble.set_auto_lock
+data:
+  device_id: LOCK_DEVICE_ID
+  seconds: ORIGINAL_SECONDS
+```
+
+### C. One disposable permanent PIN
+
+1. Create a new 4-9 digit disposable PIN:
+
+   ```yaml
+   action: ttlock_ble.add_passcode
+   data:
+     device_id: LOCK_DEVICE_ID
+     code: "DISPOSABLE_PIN"
+     type: permanent
+   ```
+
+2. Lock the door and physically confirm that PIN unlocks exactly once.
+3. Delete that same PIN:
+
+   ```yaml
+   action: ttlock_ble.delete_passcode
+   data:
+     device_id: LOCK_DEVICE_ID
+     code: "DISPOSABLE_PIN"
+     type: permanent
+   ```
+
+4. Lock the door and physically confirm the deleted PIN is rejected. Do not
+   proceed if deletion cannot be proven.
+
+### D. One disposable period PIN
+
+Choose a fresh PIN. Set `start` about five minutes in the future and `end`
+about ten minutes after `start`. Use ISO 8601 timestamps with an explicit local
+UTC offset; both boundaries are sent with minute precision.
+
+```yaml
+action: ttlock_ble.add_passcode
+data:
+  device_id: LOCK_DEVICE_ID
+  code: "DISPOSABLE_PERIOD_PIN"
+  type: period
+  start: "2026-08-22T15:05:00+01:00"
+  end: "2026-08-22T15:15:00+01:00"
+```
+
+1. Before `start`, physically confirm rejection.
+2. At least one minute after `start`, physically confirm one successful unlock.
+3. At least one minute after `end`, physically confirm rejection.
+4. Clean up the expired PIN with `ttlock_ble.delete_passcode`, using the same
+   PIN and `type: period`, then confirm it remains rejected.
+
+Do not infer success from the action call alone: the before/during/after keypad
+results are the hardware assertions. A failed boundary test may indicate lock
+RTC/time-zone drift rather than payload rejection; capture both wall clocks.
+
+## Stop conditions and known risks
+
+- `clear_passcodes` is destructive and intentionally not part of this run.
+- There is no list/read-PIN action, so physical rejection is the deletion
+  proof available in this build.
+- Firmware may reject `seconds: 0` or clamp a delay; always restore the value
+  read at the start.
+- Period PIN behaviour depends on the lock RTC matching the intended local wall
+  clock and DST offset.
+- BLE proxy reachability and response timing can differ from a direct adapter;
+  report each route separately.
+- SDK 0.1.11 debug output is not safe to share; keep its logger below debug.
+- Stop after a repeated timeout, state mismatch, unexpected unlock, failure to
+  restore auto-lock, or failure to delete a disposable PIN. Preserve sanitized
+  evidence and recover through a previously verified method.
+
+## Passage-mode preparation (later session only)
+
+Do not install the passage SDK branch until the baseline, auto-lock, permanent
+PIN and period PIN sections all pass. In a separate development environment,
+use this staged order only:
+
+1. Query the device capability mask; record the mask and derived booleans.
+2. Query existing passage schedules without mutation.
+3. Add one short interval for the current weekday.
+4. Query again and require that exact interval.
+5. Physically verify native passage behaviour during the interval without
+   repeated Home Assistant unlock calls.
+6. Delete that exact interval and query to prove removal.
+7. Confirm normal locking/auto-lock behaviour returns.
+
+Do not call `clear_passage_modes` in the first passage session. Do not claim
+model support until capability, query, add, physical behaviour, delete and
+return-to-normal all pass.

@@ -26,8 +26,9 @@ copied into either MIT project.
   configured as the fetch-only `upstream` remote and
   [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
-  `codex/management-actions`, original repository configured as the `upstream`
-  fetch-only remote and
+  `codex/hardware-validation-0`, created from `codex/management-actions` for
+  the `3.5.1rc1` prerelease candidate. The original repository remains
+  the `upstream` fetch-only remote and
   [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
   `origin`.
 - Both feature branches are pushed to their forks and tracked locally. Draft
@@ -136,8 +137,9 @@ request/result evidence.
 
 ## Next milestone
 
-1. Install the HA branch in the user's test Home Assistant environment and run
-   the baseline plus passcode/auto-lock portions of the hardware checklist.
+1. Install the `3.5.1rc1` GitHub prerelease as a HACS custom-repository
+   version and run the baseline plus passcode/auto-lock portions of the
+   hardware checklist.
 2. Capture capability bytes and sanitized passage-mode responses, convert them
    into reusable SDK fixtures, refine the protocol if required, and only then
    expose capability-gated passage-mode actions in Home Assistant.

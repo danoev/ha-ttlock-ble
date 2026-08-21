@@ -9,6 +9,14 @@
 
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
+> [!CAUTION]
+> Version `3.5.1rc1` is a hardware-validation prerelease, not a
+> production-certified release. It tests permanent and period PIN add/delete
+> plus native auto-lock read/set/disable using released `ttlock-ble==0.1.11`.
+> Passage mode is excluded and remains isolated on its SDK development branch.
+> Follow the staged [real-lock checklist](docs/HARDWARE_VALIDATION.md); do not
+> use `clear_passcodes` during the initial session.
+
 ## Features
 
 - **Local BLE control** — lock, unlock, and state queries run over the lock's BLE link; the TTLock cloud is only contacted once at setup to download per-lock keys.
