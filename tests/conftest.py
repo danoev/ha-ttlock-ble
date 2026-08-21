@@ -143,6 +143,11 @@ def mock_ttlock_client() -> Generator[MagicMock]:
     instance.get_operation_log = AsyncMock(return_value=[])
     instance.lock = AsyncMock(return_value=None)
     instance.unlock = AsyncMock(return_value=None)
+    instance.get_auto_lock_time = AsyncMock(return_value=30)
+    instance.set_auto_lock_time = AsyncMock(return_value=None)
+    instance.add_passcode = AsyncMock(return_value=None)
+    instance.delete_passcode = AsyncMock(return_value=None)
+    instance.clear_passcodes = AsyncMock(return_value=None)
     instance.add_event_listener = MagicMock(return_value=None)
     instance.remove_event_listener = MagicMock(return_value=None)
     with patch("custom_components.ttlock_ble.connection.TTLockClient") as cls:
@@ -160,6 +165,11 @@ def mock_ttlock_connection() -> Generator[MagicMock]:
     instance.async_get_operation_log = AsyncMock(return_value=[])
     instance.async_lock = AsyncMock(return_value=None)
     instance.async_unlock = AsyncMock(return_value=None)
+    instance.async_get_auto_lock_time = AsyncMock(return_value=30)
+    instance.async_set_auto_lock_time = AsyncMock(return_value=None)
+    instance.async_add_passcode = AsyncMock(return_value=None)
+    instance.async_delete_passcode = AsyncMock(return_value=None)
+    instance.async_clear_passcodes = AsyncMock(return_value=None)
     instance.is_connected = True
     with patch("custom_components.ttlock_ble.TtlockBleConnection") as cls:
         cls.return_value = instance

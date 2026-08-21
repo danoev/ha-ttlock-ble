@@ -20,6 +20,8 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
 - **Persistent BLE session with a post-drop cooldown** — keeps the link warm to receive push events, and waits before reconnecting so a lock in idle-sleep isn't thrashed.
 - **Reauth + reconfigure** — re-prompt for credentials in place when the cloud rejects the cached login, or edit them via the integration's three-dot menu.
 - **Diagnostics** — downloadable dump with credentials/keys redacted.
+- **Local management actions** — create/delete permanent or time-windowed
+  keypad passcodes and read/set/disable the lock's native auto-lock delay.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities
@@ -73,6 +75,44 @@ Settings → Devices & Services → TTLock BLE → **Configure** lets you tune:
 
 To edit credentials without removing and re-adding, use the integration's three-dot menu → **Reconfigure**.
 
+## Local management actions
+
+The first management backend is exposed as Home Assistant actions. Select the
+lock through the device picker; each action then connects through Home
+Assistant's Bluetooth manager, so a local adapter and an ESPHome active
+Bluetooth Proxy follow the same path.
+
+| Action | Purpose |
+|---|---|
+| `ttlock_ble.add_passcode` | Add a permanent or date/time-windowed keypad passcode. |
+| `ttlock_ble.delete_passcode` | Delete the specified keypad passcode. |
+| `ttlock_ble.clear_passcodes` | Irreversibly remove every keypad passcode stored by the lock. |
+| `ttlock_ble.get_auto_lock` | Return `seconds`, the current native auto-lock delay. |
+| `ttlock_ble.set_auto_lock` | Set the native delay; `seconds: 0` disables auto-lock. |
+
+Temporary windows are interpreted in Home Assistant's configured time zone and
+sent to the lock with minute precision. Correct behaviour therefore depends on
+the lock's RTC representing the same local wall clock; verify the clock before
+using a temporary credential on real hardware.
+
+The integration does not retain a submitted passcode, write it to its logs, add
+it to entity attributes, or include it in diagnostics/events. A passcode placed
+directly in an automation or script is still stored in that Home Assistant YAML
+and may appear in Home Assistant's automation trace, so protect the automation
+configuration accordingly.
+
+Example temporary passcode:
+
+```yaml
+action: ttlock_ble.add_passcode
+data:
+  device_id: 0123456789abcdef0123456789abcdef
+  code: "583921"
+  type: period
+  start: "2026-08-22T15:00:00"
+  end: "2026-08-25T10:00:00"
+```
+
 ## How it works
 
 The lock's TTLock firmware aggressively closes idle BLE sessions (~5 s of silence and it drops). The integration:
@@ -124,6 +164,8 @@ custom_components/ttlock_ble/
 ├── manual_key.py      # TtlockBleManualKey: key entry for cloud-less locks
 ├── options_flow.py    # TtlockBleOptionsFlow: scan_interval, reconnect_interval, permanent_connection
 ├── sensor.py          # TtlockBleBatterySensor backed by polls + pushes
+├── services.py        # device-targeted passcode and auto-lock actions
+├── services.yaml      # action descriptions and selectors
 └── translations/
     ├── en.json
     └── pt-BR.json

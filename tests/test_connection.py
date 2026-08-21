@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from ttlock_ble import LockEvent, TTLockError
+from ttlock_ble import KeyboardPwdType, LockEvent, TTLockError
 
 from custom_components.ttlock_ble.connection import (
     TtlockBleConnection,
@@ -123,6 +123,69 @@ async def test_unlock_happy(
     conn = TtlockBleConnection(hass, sample_virtual_key)
     await conn.async_unlock()
     mock_ttlock_client.unlock.assert_awaited_once()
+
+
+async def test_auto_lock_management(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    assert await conn.async_get_auto_lock_time() == 30
+    await conn.async_set_auto_lock_time(0)
+    mock_ttlock_client.get_auto_lock_time.assert_awaited_once()
+    mock_ttlock_client.set_auto_lock_time.assert_awaited_once_with(0)
+
+
+async def test_passcode_management(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    await conn.async_add_passcode(
+        "583921",
+        pwd_type=KeyboardPwdType.PERIOD,
+        start_date="2608221500",
+        end_date="2608251000",
+    )
+    await conn.async_delete_passcode(
+        "583921",
+        pwd_type=KeyboardPwdType.PERIOD,
+    )
+    await conn.async_clear_passcodes()
+    mock_ttlock_client.add_passcode.assert_awaited_once_with(
+        "583921",
+        pwd_type=KeyboardPwdType.PERIOD,
+        start_date="2608221500",
+        end_date="2608251000",
+    )
+    mock_ttlock_client.delete_passcode.assert_awaited_once_with(
+        "583921",
+        pwd_type=KeyboardPwdType.PERIOD,
+    )
+    mock_ttlock_client.clear_passcodes.assert_awaited_once()
+
+
+async def test_management_error_does_not_echo_passcode(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    secret_code = "583921"
+    mock_ttlock_client.add_passcode = AsyncMock(side_effect=ValueError(secret_code))
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    with pytest.raises(TTLockError) as error:
+        await conn.async_add_passcode(
+            secret_code,
+            pwd_type=KeyboardPwdType.PERMANENT,
+            start_date="0001311400",
+            end_date="9912311400",
+        )
+    assert secret_code not in str(error.value)
 
 
 async def test_lock_raises_when_device_missing(
