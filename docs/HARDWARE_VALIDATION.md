@@ -1,9 +1,13 @@
 # Real-lock hardware-validation runbook
 
-This runbook is for the `3.5.1rc4` prerelease only. It is a hardware
+This runbook is for the `3.5.1rc5` prerelease only. It is a hardware
 validation build, not production-certified. It deliberately uses released
 `ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
 isolated on the SDK development branch.
+
+RC5 has one release-blocking objective: repeatable cold-idle lock/unlock with
+no physical interaction. Do not run PIN, auto-lock, passage, card, fingerprint,
+or other management mutations during this session.
 
 Use disposable PINs that have never protected the door. Keep a mechanical key
 or another verified recovery route available. Do not run `clear_passcodes`,
@@ -28,6 +32,7 @@ logger:
   default: warning
   logs:
     custom_components.ttlock_ble: debug
+    bleak_retry_connector: debug
 ```
 
 Do **not** enable `ttlock_ble.client` at debug level in this build. Released SDK
@@ -57,37 +62,62 @@ sequence:
     response_variable: auto_lock_result
 ```
 
-## RC4 active-acquisition check
+## RC5 cold-idle repeatability test
 
-Run this before PIN or auto-lock mutation. It verifies the refined acquisition
-path without requiring the lock to be touched first.
+Use the direct USB adapter and present installation first. The target lock is
+`B6:D4:1E:DB:15:F8`, protocol 5.3, scene 2. Do not improve radio placement
+until this baseline is recorded.
 
-1. Restart Home Assistant with integration debug logging enabled. Confirm the
-   passive advertisement updates state/battery, then wait until the connection
-   entity reports disconnected.
-2. With the lock physically idle, invoke `lock.unlock`. Record the timestamps
-   for request, immediate cache miss/hit, active-acquisition start, connectable
-   cache hit, BLE connection established and command completion. A cache miss
-   may take up to 25 seconds; do not touch or wake the lock during the wait.
-3. Relock through Home Assistant after the connection drops and record the same
-   stages. Require one active-acquisition start at most per command and no
-   repeating scan starts every 0.5 seconds.
-4. Repeat steps 2 and 3 first through the direct adapter, then through the
-   ESPHome active proxy if available. Record source, RSSI, acquisition latency,
-   total command latency and final physical/entity state separately.
-5. Start an unlock while the lock is unavailable, then cancel the service call
-   or unload/reload the integration. Require prompt cancellation, no later
-   connection, no dangling task and no entity left permanently `locking` or
-   `unlocking`.
-6. For one controlled timeout, keep the lock out of range. Require a detailed
-   reachability message rather than a generic error, then return the lock to
-   range and prove the next command succeeds.
+1. Close TTLock, LightBlue, and every other phone BLE tool. Disable their
+   background access if necessary. Do not touch the keypad, fingerprint reader,
+   handle, or lock body during acquisition.
+2. Restart Home Assistant with the safe loggers above. Confirm passive state
+   and battery advertisements arrive, then wait at least three minutes and
+   require the connection entity to be `disconnected` before attempt 1.
+3. Invoke `lock.unlock` once. Record source, RSSI, candidate resolution,
+   candidate-acquisition time, GATT connection time, total command time,
+   physical result, entity result, and pass/fail. A successful result requires
+   the physical lock to unlock with no human interaction at the lock.
+4. Return the lock to the locked starting state through Home Assistant only
+   where practical. Wait for the BLE connection to drop, then leave the lock
+   idle for at least three minutes before the next independent unlock.
+5. Repeat until there are 10 independent cold-idle unlock attempts. Run at
+   least five with the door closed in its normal position and current radio
+   placement. Target: **10/10**. Record median and worst successful latency;
+   bounded acquisition remains 25 seconds.
+6. Starting from an unlocked state, repeat the same disconnected/three-minute
+   idle preparation and measurement for 10 independent Home Assistant lock
+   commands where mechanically meaningful. Target: **10/10** without physical
+   interaction, including at least five door-closed attempts.
+7. Verify logs show at most one active-acquisition request per command, no
+   simultaneous GATT attempts for the lock, and a real SDK connection attempt
+   after either `aggregate connectable history` or `connectable scanner path`
+   resolution. `bleak_retry_connector` debug records connection attempts; do
+   not enable `ttlock_ble.client` debug.
+8. Run one controlled out-of-range timeout. Require the detailed HA
+   reachability diagnosis, then restore range and prove a fresh cold-idle
+   command succeeds.
+9. Run one cancellation and one integration-unload test while acquisition is
+   pending. Require prompt completion, no late connection/command, no dangling
+   task, and no entity stranded in `locking` or `unlocking`.
 
-The cache polling interval is not a radio polling interval: RC4 requests one
-bounded HA-managed active window and only reads HA's in-memory connectable
-device cache approximately every 0.5 seconds inside it.
+Use one row per command:
 
-## Initial sequence
+| # | Command | Door | Source | RSSI | Candidate s | GATT s | Total s | Physical/entity result | Pass |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| 1 | unlock | closed/open | hci0/proxy |  |  |  |  |  |  |
+
+The cache polling interval is not a radio polling interval. RC5 first checks
+HA's aggregate history and per-connectable-scanner records. Only when both are
+empty does it request one bounded HA-managed active window and re-read those
+in-memory representations approximately every 0.5 seconds.
+
+Stop on the first unintended physical operation, repeated timeout, late command
+after cancellation, persistent entity transition, or evidence of a secret in
+logs. A result below 10/10 is not a pass; preserve sanitized evidence and do
+not proceed to management features.
+
+## Deferred management sequence — do not run for RC5
 
 ### A. Eight-step baseline
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from homeassistant.components.bluetooth import (
     async_ble_device_from_address,
     async_last_service_info,
     async_request_active_scan,
+    async_scanner_devices_by_address,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -54,6 +56,16 @@ EXPLICIT_CONNECT_CACHE_POLL_SECONDS = 0.5
 # tens of seconds. Anything older than this batch is picked up by the
 # next poll.
 MAX_LOG_ENTRIES_PER_FETCH = 25
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionCandidate:
+    """One HA-owned connectable representation of the lock."""
+
+    device: BLEDevice
+    resolution: str
+    source: str
+    rssi: int | None
 
 
 def event_signal(mac: str) -> str:
@@ -146,7 +158,7 @@ class TtlockBleConnection:
         not consulted here: it paces the background loop, not the reads.
         """
         async with self._lock:
-            client = await self._async_ensure_connected_locked()
+            client = await self._async_ensure_connected_locked(reason="state query")
             if client is None:
                 return None
             try:
@@ -242,7 +254,7 @@ class TtlockBleConnection:
         answers.
         """
         async with self._lock:
-            client = await self._async_ensure_connected_locked()
+            client = await self._async_ensure_connected_locked(reason="operation log")
             if client is None:
                 LOGGER.warning("get_operation_log: no client for %s", self._key.lockMac)
                 return []
@@ -317,7 +329,10 @@ class TtlockBleConnection:
             self._key.lockMac,
         )
         async with self._lock:
-            client = await self._async_ensure_connected_locked(active_scan=True)
+            client = await self._async_ensure_connected_locked(
+                active_scan=True,
+                reason=f"explicit {action}",
+            )
             if client is None:
                 msg = f"Lock {self._key.lockMac} not reachable via Bluetooth"
                 if self._reachability_diagnostic is not None:
@@ -361,7 +376,10 @@ class TtlockBleConnection:
             self._key.lockMac,
         )
         async with self._lock:
-            client = await self._async_ensure_connected_locked(active_scan=active_scan)
+            client = await self._async_ensure_connected_locked(
+                active_scan=active_scan,
+                reason=f"management {action}",
+            )
             if client is None:
                 msg = f"Lock {self._key.lockMac} is not reachable via Bluetooth"
                 if self._reachability_diagnostic is not None:
@@ -392,6 +410,7 @@ class TtlockBleConnection:
         self,
         *,
         active_scan: bool = False,
+        reason: str,
     ) -> TTLockClient | None:
         """
         Return a live client, opening a new BLE session if needed.
@@ -402,26 +421,42 @@ class TtlockBleConnection:
         lock's single central slot with nobody left to close it, and
         block the connection the reloaded entry is trying to make.
         """
+        started = monotonic()
         self._reachability_diagnostic = None
+        LOGGER.debug(
+            "Connection acquisition started for %s "
+            "(reason=%s, existing_client_connected=%s, active_scan=%s)",
+            self._key.lockMac,
+            reason,
+            self.is_connected,
+            active_scan,
+        )
         if self._closing:
+            LOGGER.debug(
+                "Connection acquisition skipped for %s (reason=%s, failure=closing)",
+                self._key.lockMac,
+                reason,
+            )
             return None
         if self._client is not None and self._client.is_connected:
+            LOGGER.debug(
+                "Reusing live BLE connection for %s (reason=%s, elapsed=%.1fs)",
+                self._key.lockMac,
+                reason,
+                monotonic() - started,
+            )
             return self._client
         await self._async_disconnect_locked()
-        device = async_ble_device_from_address(
-            self._hass,
-            self._key.lockMac,
-            connectable=True,
+        candidate = self._resolve_connection_candidate(
+            include_scanner_paths=active_scan,
+            reason=reason,
+            log_miss=True,
         )
-        if active_scan:
-            LOGGER.debug(
-                "Immediate connectable lookup for %s: %s",
-                self._key.lockMac,
-                "available" if device is not None else "unavailable",
+        if candidate is None and active_scan:
+            candidate = await self._async_wait_for_connectable_device_locked(
+                reason=reason,
             )
-        if device is None and active_scan:
-            device = await self._async_wait_for_connectable_device_locked()
-        if device is None and not self._closing_event.is_set():
+        if candidate is None and not self._closing_event.is_set():
             try:
                 diagnostic = async_address_reachability_diagnostics(
                     self._hass,
@@ -437,28 +472,67 @@ class TtlockBleConnection:
             else:
                 self._reachability_diagnostic = diagnostic
                 LOGGER.debug(
-                    "Lock %s is not reachable via Bluetooth: %s",
+                    "Lock %s is not reachable via Bluetooth "
+                    "(reason=%s, elapsed=%.1fs): %s",
                     self._key.lockMac,
+                    reason,
+                    monotonic() - started,
                     diagnostic,
                 )
-        if device is None or self._closing_event.is_set():
+        if candidate is None or self._closing_event.is_set():
             return None
         client = TTLockClient.from_ble_device(
-            device,
+            candidate.device,
             self._key,
             disconnected_callback=self._on_disconnected,
         )
         connect_started = monotonic()
-        LOGGER.debug("Opening BLE connection for %s", self._key.lockMac)
+        LOGGER.debug(
+            "Opening BLE connection for %s "
+            "(reason=%s, resolution=%s, source=%s, RSSI=%s, "
+            "candidate_elapsed=%.1fs; GATT retries delegated to ttlock-ble)",
+            self._key.lockMac,
+            reason,
+            candidate.resolution,
+            candidate.source,
+            candidate.rssi if candidate.rssi is not None else "unknown",
+            connect_started - started,
+        )
         try:
             await client.connect()
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            raise
         except TTLockError as exc:
-            LOGGER.debug("BLE connect failed for %s: %s", self._key.lockMac, exc)
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            LOGGER.debug(
+                "BLE connect failed for %s "
+                "(reason=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs): %s",
+                self._key.lockMac,
+                reason,
+                monotonic() - connect_started,
+                monotonic() - started,
+                exc,
+            )
+            return None
+        if self._closing_event.is_set():
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            LOGGER.debug(
+                "Discarded late BLE connection for %s (reason=%s, failure=closing)",
+                self._key.lockMac,
+                reason,
+            )
             return None
         LOGGER.debug(
-            "BLE connection established for %s (elapsed=%.1fs)",
+            "BLE connection established for %s "
+            "(reason=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs)",
             self._key.lockMac,
+            reason,
             monotonic() - connect_started,
+            monotonic() - started,
         )
         client.add_event_listener(self._on_event)
         self._client = client
@@ -466,13 +540,110 @@ class TtlockBleConnection:
         self._broadcast_connection_state(connected=True)
         return client
 
-    async def _async_wait_for_connectable_device_locked(self) -> BLEDevice | None:
-        """Run one active scan while polling HA's connectable-device cache."""
+    def _resolve_connection_candidate(
+        self,
+        *,
+        include_scanner_paths: bool,
+        reason: str,
+        log_miss: bool = False,
+    ) -> _ConnectionCandidate | None:
+        """Resolve a route from HA aggregate history or connectable scanners."""
+        address = self._key.lockMac
+        passive_info = async_last_service_info(
+            self._hass,
+            address,
+            connectable=False,
+        )
+        device = async_ble_device_from_address(
+            self._hass,
+            address,
+            connectable=True,
+        )
+        if device is not None:
+            service_info = async_last_service_info(
+                self._hass,
+                address,
+                connectable=True,
+            )
+            candidate = _ConnectionCandidate(
+                device=device,
+                resolution="aggregate connectable history",
+                source=service_info.source if service_info is not None else "unknown",
+                rssi=service_info.rssi if service_info is not None else None,
+            )
+            LOGGER.debug(
+                "Connection candidate resolved for %s "
+                "(reason=%s, passive_history=%s, resolution=%s, "
+                "source=%s, RSSI=%s)",
+                address,
+                reason,
+                passive_info is not None,
+                candidate.resolution,
+                candidate.source,
+                candidate.rssi if candidate.rssi is not None else "unknown",
+            )
+            return candidate
+
+        scanner_devices = (
+            async_scanner_devices_by_address(
+                self._hass,
+                address,
+                connectable=True,
+            )
+            if include_scanner_paths
+            else []
+        )
+        if scanner_devices:
+            scanner_device = max(
+                scanner_devices,
+                key=lambda path: path.advertisement.rssi,
+            )
+            candidate = _ConnectionCandidate(
+                device=scanner_device.ble_device,
+                resolution="connectable scanner path",
+                source=scanner_device.scanner.source,
+                rssi=scanner_device.advertisement.rssi,
+            )
+            LOGGER.debug(
+                "Connection candidate resolved for %s "
+                "(reason=%s, passive_history=%s, "
+                "aggregate_connectable_history=False, scanner_paths=%d, "
+                "resolution=%s, source=%s, RSSI=%s)",
+                address,
+                reason,
+                passive_info is not None,
+                len(scanner_devices),
+                candidate.resolution,
+                candidate.source,
+                candidate.rssi,
+            )
+            return candidate
+
+        if log_miss:
+            LOGGER.debug(
+                "No connection candidate for %s "
+                "(reason=%s, passive_history=%s, "
+                "aggregate_connectable_history=False, scanner_paths=%s)",
+                address,
+                reason,
+                passive_info is not None,
+                "0" if include_scanner_paths else "not checked",
+            )
+        return None
+
+    async def _async_wait_for_connectable_device_locked(
+        self,
+        *,
+        reason: str,
+    ) -> _ConnectionCandidate | None:
+        """Run one active scan while polling HA's connectable representations."""
         address = self._key.lockMac
         started = monotonic()
         LOGGER.debug(
-            "Starting active acquisition for %s (timeout=%ds, cache_poll=%.1fs)",
+            "Starting active acquisition for %s "
+            "(reason=%s, timeout=%ds, cache_poll=%.1fs)",
             address,
+            reason,
             EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
             EXPLICIT_CONNECT_CACHE_POLL_SECONDS,
         )
@@ -502,26 +673,23 @@ class TtlockBleConnection:
                 if self._closing or closing_task in done:
                     return None
 
-                device = async_ble_device_from_address(
-                    self._hass,
-                    address,
-                    connectable=True,
+                candidate = self._resolve_connection_candidate(
+                    include_scanner_paths=True,
+                    reason=reason,
                 )
-                if device is not None:
-                    service_info = async_last_service_info(
-                        self._hass,
-                        address,
-                        connectable=True,
-                    )
+                if candidate is not None:
                     LOGGER.debug(
-                        "Connectable device became available for %s "
-                        "(elapsed=%.1fs, source=%s, RSSI=%s)",
+                        "Connection candidate became available for %s "
+                        "(reason=%s, elapsed=%.1fs, resolution=%s, "
+                        "source=%s, RSSI=%s)",
                         address,
+                        reason,
                         monotonic() - started,
-                        service_info.source if service_info is not None else "unknown",
-                        service_info.rssi if service_info is not None else "unknown",
+                        candidate.resolution,
+                        candidate.source,
+                        candidate.rssi if candidate.rssi is not None else "unknown",
                     )
-                    return device
+                    return candidate
 
                 if scan_task in done:
                     try:
@@ -620,7 +788,9 @@ class TtlockBleConnection:
         while not self._closing:
             try:
                 async with self._lock:
-                    client = await self._async_ensure_connected_locked()
+                    client = await self._async_ensure_connected_locked(
+                        reason="background maintenance",
+                    )
                 if client is None:
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, RECONNECT_MAX_BACKOFF)

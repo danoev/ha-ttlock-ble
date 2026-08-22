@@ -27,7 +27,7 @@ copied into either MIT project.
   [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
   `codex/hardware-validation-0`, created from `codex/management-actions` for
-  the `3.5.1rc4` prerelease candidate. The original repository remains
+  the `3.5.1rc5` prerelease candidate. The original repository remains
   the `upstream` fetch-only remote and
   [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
   `origin`.
@@ -55,10 +55,14 @@ copied into either MIT project.
 - Added action schemas, device targeting, timezone conversion, translated
   errors, unloaded-device handling, and secret-redaction tests.
 - Added a [real-lock validation checklist](docs/HARDWARE_VALIDATION.md).
-- Refined explicit BLE acquisition for RC4: one HA-managed 25-second active
-  scan is paired with 0.5-second reads of HA's local connectable-device cache.
-  No advertisement callback is required for success and no repeated scanner,
-  GATT connection or TTLock command is created by the polling loop.
+- Diagnosed the RC4 cold-idle gate and recorded the confirmed/inferred/unknown
+  evidence in [the RC5 investigation](docs/RC5_COLD_IDLE_INVESTIGATION.md).
+- Refined explicit BLE acquisition for RC5: after an aggregate connectable
+  history miss, the integration accepts a record for the exact address from an
+  HA-registered connectable local/proxy scanner and starts the existing SDK
+  GATT/retry path. One HA-managed 25-second active scan remains the fallback
+  only when neither representation exists. Background acquisition remains
+  non-active and does not use the new explicit scanner-path fallback.
 
 The Home Assistant integration intentionally continues to depend on the
 released `ttlock-ble==0.1.11`. Its passcode and auto-lock actions therefore
@@ -80,7 +84,7 @@ Current local branches:
 
 - `ttlock-ble`: 303 tests passed, 97.31% coverage; Ruff and configured strict
   mypy pass.
-- `ha-ttlock-ble`: 297 tests passed, 99.48% coverage; Ruff and configured mypy
+- `ha-ttlock-ble`: 305 tests passed, 99.50% coverage; Ruff and configured mypy
   pass.
 - `manifest.json`, `hacs.json`, translation JSON, and `services.yaml` parse;
   the manifest and project versions agree.
@@ -130,24 +134,25 @@ Recommendation: make an on-demand-only mode the preferred low-battery design
 for users who accept losing between-command real-time push events, while
 retaining periodic/persistent listening as an explicit opt-in. The existing
 `permanent_connection` option should remain explicit because reconnecting
-immediately after every idle drop is the highest-drain mode. RC4 deliberately
+immediately after every idle drop is the highest-drain mode. RC5 deliberately
 does not change the maintenance loop or its defaults; that architecture change
 needs separate UX, migration, event-loss and hardware-battery validation.
 
 Advertisement-history clearing was reviewed but is not used. Home Assistant
 documents it for forcing an otherwise identical advertisement to be processed
-as new, whereas RC4 succeeds by observing the connectable cache without a new
-callback. The current HA implementation also removes connectable history, so
-clearing it would discard the state RC4 is waiting to acquire and could affect
-other Bluetooth consumers of that address.
+as new. RC5 instead reads existing HA aggregate and per-scanner representations;
+the current HA implementation also removes connectable history, so clearing it
+could discard useful state and affect other Bluetooth consumers of that
+address.
 
-## Known-working locks
+## Hardware status
 
-No physical lock model has been validated on these feature branches yet. The
-existing upstream-supported behaviour and fixtures continue to pass, but no
-new management feature should be labelled hardware-supported until the
-checklist captures the lock model, firmware, transport route, and sanitized
-request/result evidence.
+The protocol 5.3 / scene 2 lock at `B6:D4:1E:DB:15:F8` has proved passive
+state/battery, authenticated GATT, and physical lock/unlock through Home
+Assistant. The official iOS app and the integration's background loop have
+also connected from cold idle without keypad touch. RC5's new explicit path is
+not yet repeatability-validated: it requires the documented 10/10 unlock and
+10/10 lock no-touch run before the connection issue can be called solved.
 
 ## Unsupported or intentionally deferred features
 
@@ -180,9 +185,8 @@ request/result evidence.
 
 ## Next milestone
 
-1. Install the `3.5.1rc4` GitHub prerelease as a HACS custom-repository
-   version and run the baseline plus passcode/auto-lock portions of the
-   hardware checklist.
-2. Capture capability bytes and sanitized passage-mode responses, convert them
-   into reusable SDK fixtures, refine the protocol if required, and only then
-   expose capability-gated passage-mode actions in Home Assistant.
+1. Install the `3.5.1rc5` GitHub prerelease as a HACS custom-repository version
+   and run the exact cold-idle 10 unlock + 10 lock procedure with no physical
+   interaction.
+2. Do not resume PIN, passage, card, fingerprint, or other feature development
+   until that run passes and its sanitized timing/route evidence is reviewed.

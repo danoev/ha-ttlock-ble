@@ -18,12 +18,12 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc4` is a hardware-validation prerelease, not a
-> production-certified release. It tests permanent and period PIN add/delete
-> plus native auto-lock read/set/disable using released `ttlock-ble==0.1.11`.
-> Passage mode is excluded and remains isolated on its SDK development branch.
-> Follow the staged [real-lock checklist](docs/HARDWARE_VALIDATION.md); do not
-> use `clear_passcodes` during the initial session.
+> Version `3.5.1rc5` is a hardware-validation prerelease, not a
+> production-certified release. Its sole release gate is repeatable cold-idle,
+> no-touch lock/unlock using released `ttlock-ble==0.1.11`. Passage mode and
+> further credential work are excluded. Follow the staged
+> [real-lock checklist](docs/HARDWARE_VALIDATION.md) and do not run management
+> mutations during the RC5 session.
 
 ## Features
 
@@ -39,8 +39,10 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
 - **Local management actions** — create/delete permanent or time-windowed
   keypad passcodes and read/set/disable the lock's native auto-lock delay.
 - **Bounded command acquisition** — an explicit command that cannot immediately
-  resolve a connectable lock requests one 25-second Home Assistant active scan
-  and checks HA's local cache every 0.5 seconds during that single window.
+  resolve aggregate connectable history also checks HA's per-connectable-scanner
+  paths, then requests one 25-second Home Assistant active scan only if no such
+  path exists. The first candidate goes through the SDK's normal retried GATT
+  connection flow.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities

@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.components.bluetooth import BluetoothReachabilityIntent
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from ttlock_ble import KeyboardPwdType, LockEvent, TTLockError
+from ttlock_ble import KeyboardPwdType, LockEvent, TTLockClient, TTLockError
 
 from custom_components.ttlock_ble.connection import (
     EXPLICIT_CONNECT_CACHE_POLL_SECONDS,
@@ -23,6 +23,20 @@ from custom_components.ttlock_ble.connection import (
 def _log_entry(record_number: int) -> SimpleNamespace:
     """Build a minimal LogEntry stand-in keyed by `record_number`."""
     return SimpleNamespace(record_number=record_number)
+
+
+def _scanner_device(
+    device: object,
+    *,
+    source: str,
+    rssi: int,
+) -> SimpleNamespace:
+    """Build the public HA per-scanner device shape used by the resolver."""
+    return SimpleNamespace(
+        scanner=SimpleNamespace(source=source),
+        ble_device=device,
+        advertisement=SimpleNamespace(rssi=rssi),
+    )
 
 
 def test_event_signal_lowercases_mac() -> None:
@@ -249,6 +263,128 @@ async def test_lock_happy(
     mock_active_scan.assert_not_awaited()
 
 
+@pytest.mark.parametrize("source", ["hci0", "esp32-proxy-kitchen"])
+async def test_cold_idle_uses_connectable_scanner_path_without_aggregate_history(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+    source: str,
+) -> None:
+    """A local or proxy scanner path can start GATT despite aggregate miss."""
+    mock_ble_resolver.return_value = None
+    scanner_path = _scanner_device(mock_ble_device, source=source, rssi=-82)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_scanner_devices_by_address",
+        return_value=[scanner_path],
+    ) as scanner_resolver:
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        await conn.async_unlock()
+
+    scanner_resolver.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+        connectable=True,
+    )
+    mock_active_scan.assert_not_awaited()
+    from custom_components.ttlock_ble import connection as connection_module
+
+    connection_module.TTLockClient.from_ble_device.assert_called_once_with(
+        mock_ble_device,
+        sample_virtual_key,
+        disconnected_callback=conn._on_disconnected,
+    )
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_awaited_once()
+
+
+async def test_active_scan_accepts_delayed_connectable_scanner_path(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """The bounded wait polls both HA representations and uses the first path."""
+    mock_ble_resolver.return_value = None
+    scanner_path = _scanner_device(
+        mock_ble_device,
+        source="esp32-proxy-hall",
+        rssi=-78,
+    )
+    scan_started = asyncio.Event()
+
+    async def _keep_active_scan_open(*_args) -> None:
+        scan_started.set()
+        await asyncio.Future()
+
+    mock_active_scan.side_effect = _keep_active_scan_open
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.async_scanner_devices_by_address",
+            side_effect=[[], [], [scanner_path]],
+        ) as scanner_resolver,
+        patch(
+            "custom_components.ttlock_ble.connection."
+            "EXPLICIT_CONNECT_CACHE_POLL_SECONDS",
+            0.001,
+        ),
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        await conn.async_lock()
+
+    assert scan_started.is_set()
+    assert scanner_resolver.call_count == 3
+    mock_active_scan.assert_awaited_once_with(
+        hass,
+        EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+    )
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_awaited_once()
+
+
+async def test_sdk_connection_boundary_allows_transient_retry_success(
+    sample_virtual_key,
+    mock_ble_device,
+) -> None:
+    """Released SDK configures three connector attempts and accepts retry success."""
+    sdk_client = TTLockClient.from_ble_device(mock_ble_device, sample_virtual_key)
+    bleak_client = MagicMock(is_connected=True)
+    bleak_client.start_notify = AsyncMock(return_value=None)
+    notify_char = MagicMock()
+    attempts = 0
+
+    async def _establish(*_args, max_attempts: int, **_kwargs):
+        nonlocal attempts
+        while attempts < max_attempts:
+            attempts += 1
+            if attempts == 1:
+                continue  # Simulated transient connection-layer failure.
+            return bleak_client
+        raise AssertionError
+
+    async def _discover_chars() -> None:
+        sdk_client._notify_char = notify_char
+
+    with (
+        patch("ttlock_ble.client.establish_connection", side_effect=_establish),
+        patch.object(
+            sdk_client,
+            "_discover_chars",
+            side_effect=_discover_chars,
+        ),
+        patch.object(sdk_client, "_wake_battery_read", new=AsyncMock()),
+        patch("ttlock_ble.client.asyncio.sleep", new=AsyncMock()),
+    ):
+        await sdk_client.connect()
+
+    assert attempts == 2
+    assert sdk_client.is_connected
+
+
 async def test_explicit_command_active_scans_then_resolves_connectable_device(
     hass,
     sample_virtual_key,
@@ -470,6 +606,103 @@ async def test_simultaneous_commands_share_one_active_scan(
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.lock.assert_awaited_once()
     mock_ttlock_client.unlock.assert_awaited_once()
+
+
+async def test_explicit_command_reuses_background_connection_in_progress(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """The mutex lets explicit work reuse the background acquisition result."""
+    connect_started = asyncio.Event()
+    release_connect = asyncio.Event()
+
+    async def _connect() -> None:
+        connect_started.set()
+        await release_connect.wait()
+
+    mock_ttlock_client.connect.side_effect = _connect
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    async def _background_acquire():
+        async with conn._lock:
+            return await conn._async_ensure_connected_locked(
+                reason="background maintenance",
+            )
+
+    background = asyncio.create_task(_background_acquire())
+    await asyncio.wait_for(connect_started.wait(), timeout=1)
+    explicit = asyncio.create_task(conn.async_unlock())
+    await asyncio.sleep(0)
+    mock_ttlock_client.unlock.assert_not_awaited()
+
+    release_connect.set()
+    assert await background is mock_ttlock_client
+    await explicit
+
+    mock_ble_resolver.assert_called_once()
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_awaited_once()
+    mock_active_scan.assert_not_awaited()
+
+
+async def test_cancelling_during_gatt_connect_disconnects_partial_client(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Cancellation during SDK acquisition cannot retain or finish a late link."""
+    connect_started = asyncio.Event()
+
+    async def _connect() -> None:
+        connect_started.set()
+        await asyncio.Future()
+
+    mock_ttlock_client.connect.side_effect = _connect
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(connect_started.wait(), timeout=1)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    assert conn._client is None
+
+
+async def test_unload_during_gatt_connect_discards_late_connection(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Unload/shutdown wins a connect race and closes the resulting client."""
+    connect_started = asyncio.Event()
+    release_connect = asyncio.Event()
+
+    async def _connect() -> None:
+        connect_started.set()
+        await release_connect.wait()
+
+    mock_ttlock_client.connect.side_effect = _connect
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_unlock())
+    await asyncio.wait_for(connect_started.wait(), timeout=1)
+    stopping = asyncio.create_task(conn.async_stop())
+    await asyncio.sleep(0)
+    release_connect.set()
+
+    with pytest.raises(TTLockError, match="not reachable"):
+        await operation
+    await stopping
+
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_not_awaited()
+    assert conn._client is None
 
 
 async def test_unlock_happy(
@@ -706,6 +939,31 @@ async def test_maintain_loop_keeps_trying_when_device_missing(
     # The resolver must have been hit multiple times by the maintain loop.
     assert mock_ble_resolver.call_count >= 2
     mock_active_scan.assert_not_awaited()
+
+
+async def test_background_acquisition_does_not_use_explicit_scanner_fallback(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """RC5 does not make background maintenance more radio-aggressive."""
+    mock_ble_resolver.return_value = None
+    scanner_path = _scanner_device(mock_ble_device, source="hci0", rssi=-72)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_scanner_devices_by_address",
+        return_value=[scanner_path],
+    ) as scanner_resolver:
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        async with conn._lock:
+            client = await conn._async_ensure_connected_locked(
+                reason="background maintenance",
+            )
+
+    assert client is None
+    scanner_resolver.assert_not_called()
+    mock_ttlock_client.connect.assert_not_awaited()
 
 
 async def test_maintain_loop_logs_unexpected_error(

@@ -132,6 +132,10 @@ def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
             new=resolver,
         ),
         patch(
+            "custom_components.ttlock_ble.connection.async_scanner_devices_by_address",
+            return_value=[],
+        ),
+        patch(
             "custom_components.ttlock_ble.connection.async_last_service_info",
             return_value=service_info,
         ),
