@@ -18,7 +18,7 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc3` is a hardware-validation prerelease, not a
+> Version `3.5.1rc4` is a hardware-validation prerelease, not a
 > production-certified release. It tests permanent and period PIN add/delete
 > plus native auto-lock read/set/disable using released `ttlock-ble==0.1.11`.
 > Passage mode is excluded and remains isolated on its SDK development branch.
@@ -38,6 +38,9 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
 - **Diagnostics** — downloadable dump with credentials/keys redacted.
 - **Local management actions** — create/delete permanent or time-windowed
   keypad passcodes and read/set/disable the lock's native auto-lock delay.
+- **Bounded command acquisition** — an explicit command that cannot immediately
+  resolve a connectable lock requests one 25-second Home Assistant active scan
+  and checks HA's local cache every 0.5 seconds during that single window.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities
@@ -137,6 +140,24 @@ The lock's TTLock firmware aggressively closes idle BLE sessions (~5 s of silenc
 2. Keeps a persistent BLE session via `connection.py`, reconnecting on every drop signalled by bleak, and waiting out the configured `reconnect_interval` before doing so — or none at all with `permanent_connection`.
 3. After a user-initiated `lock`/`unlock`, the SDK keeps the link alive for 25 s so push events (the lock's reports of keypad operations, auto-locks, etc.) reach Home Assistant in real time.
 4. Each push event carries the decoded `lock_state` and `battery` when the firmware emits a heartbeat-style payload, letting the entities update without a follow-up query.
+
+### Passive versus connectable Bluetooth
+
+Home Assistant can receive a TTLock passive advertisement without currently
+having a connectable `BLEDevice`. The passive packet is sufficient for bolt
+state and battery, but lock/unlock and local credential or auto-lock management
+need a connectable path.
+
+For those explicit operations only, the integration first checks Home
+Assistant's connectable-device cache. If the lock is absent, it requests one
+bounded 25-second active scan and rechecks that same in-memory cache every 0.5
+seconds. A device that appears is used immediately through the existing
+`TTLockClient.from_ble_device()` path. The 0.5-second checks do not start new
+scanners, create GATT connections, or transmit TTLock commands; they only read
+Home Assistant's local Bluetooth state. Timeout retains the detailed Bluetooth
+reachability diagnosis. Passive tracking, coordinator refreshes, operation-log
+polling and the background reconnect loop never invoke this active-acquisition
+path.
 
 ## Useful commands
 

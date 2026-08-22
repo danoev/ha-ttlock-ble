@@ -16,15 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from homeassistant.components.bluetooth import (
-    BluetoothCallbackMatcher,
     BluetoothReachabilityIntent,
-    BluetoothScanningMode,
     async_address_reachability_diagnostics,
     async_ble_device_from_address,
-    async_process_advertisements,
+    async_last_service_info,
+    async_request_active_scan,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from bleak import BleakClient
+    from bleak.backends.device import BLEDevice
     from homeassistant.core import HomeAssistant
 
     from ttlock_ble import LockEvent, LockState, LogEntry, VirtualKey
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
 RECONNECT_INITIAL_BACKOFF = 1.0
 RECONNECT_MAX_BACKOFF = 300.0
 EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS = 25
+EXPLICIT_CONNECT_CACHE_POLL_SECONDS = 0.5
 
 # The lock answers the operation log one record per BLE frame, each with
 # its own timeout, and the SDK holds its command lock for the whole
@@ -308,6 +310,12 @@ class TtlockBleConnection:
         of `aes_decrypt` on a garbled frame. `TTLockError` subclasses
         `RuntimeError`, so it has to be caught first.
         """
+        started = monotonic()
+        LOGGER.debug(
+            "Explicit %s requested for %s",
+            action,
+            self._key.lockMac,
+        )
         async with self._lock:
             client = await self._async_ensure_connected_locked(active_scan=True)
             if client is None:
@@ -320,6 +328,12 @@ class TtlockBleConnection:
                     await client.lock()
                 else:
                     await client.unlock()
+                LOGGER.debug(
+                    "Explicit %s completed for %s (elapsed=%.1fs)",
+                    action,
+                    self._key.lockMac,
+                    monotonic() - started,
+                )
             except TTLockError:
                 await self._async_disconnect_locked()
                 raise
@@ -340,6 +354,12 @@ class TtlockBleConnection:
         active_scan: bool,
     ) -> T:
         """Run management without including its secret inputs in errors."""
+        started = monotonic()
+        LOGGER.debug(
+            "Explicit %s requested for %s",
+            action,
+            self._key.lockMac,
+        )
         async with self._lock:
             client = await self._async_ensure_connected_locked(active_scan=active_scan)
             if client is None:
@@ -348,7 +368,7 @@ class TtlockBleConnection:
                     msg = f"{msg}: {self._reachability_diagnostic}"
                 raise TTLockError(msg)
             try:
-                return await operation(client)
+                result = await operation(client)
             except TTLockError:
                 await self._async_disconnect_locked()
                 raise
@@ -360,6 +380,13 @@ class TtlockBleConnection:
                 await self._async_disconnect_locked()
                 msg = f"Lock {self._key.lockMac} failed to {action}"
                 raise TTLockError(msg) from exc
+            LOGGER.debug(
+                "Explicit %s completed for %s (elapsed=%.1fs)",
+                action,
+                self._key.lockMac,
+                monotonic() - started,
+            )
+            return result
 
     async def _async_ensure_connected_locked(
         self,
@@ -386,19 +413,15 @@ class TtlockBleConnection:
             self._key.lockMac,
             connectable=True,
         )
-        if (
-            device is None
-            and active_scan
-            and await self._async_wait_for_connectable_advertisement_locked()
-        ):
-            device = async_ble_device_from_address(
-                self._hass,
+        if active_scan:
+            LOGGER.debug(
+                "Immediate connectable lookup for %s: %s",
                 self._key.lockMac,
-                connectable=True,
+                "available" if device is not None else "unavailable",
             )
-        if device is None:
-            if self._closing_event.is_set():
-                return None
+        if device is None and active_scan:
+            device = await self._async_wait_for_connectable_device_locked()
+        if device is None and not self._closing_event.is_set():
             try:
                 diagnostic = async_address_reachability_diagnostics(
                     self._hass,
@@ -418,39 +441,44 @@ class TtlockBleConnection:
                     self._key.lockMac,
                     diagnostic,
                 )
+        if device is None or self._closing_event.is_set():
             return None
         client = TTLockClient.from_ble_device(
             device,
             self._key,
             disconnected_callback=self._on_disconnected,
         )
+        connect_started = monotonic()
+        LOGGER.debug("Opening BLE connection for %s", self._key.lockMac)
         try:
             await client.connect()
         except TTLockError as exc:
             LOGGER.debug("BLE connect failed for %s: %s", self._key.lockMac, exc)
             return None
+        LOGGER.debug(
+            "BLE connection established for %s (elapsed=%.1fs)",
+            self._key.lockMac,
+            monotonic() - connect_started,
+        )
         client.add_event_listener(self._on_event)
         self._client = client
         self._disconnected.clear()
         self._broadcast_connection_state(connected=True)
         return client
 
-    async def _async_wait_for_connectable_advertisement_locked(self) -> bool:
-        """Actively wait once for this lock during an explicit user operation."""
+    async def _async_wait_for_connectable_device_locked(self) -> BLEDevice | None:
+        """Run one active scan while polling HA's connectable-device cache."""
         address = self._key.lockMac
+        started = monotonic()
         LOGGER.debug(
-            "Lock %s has no connectable path; actively scanning for up to %ds",
+            "Starting active acquisition for %s (timeout=%ds, cache_poll=%.1fs)",
             address,
             EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+            EXPLICIT_CONNECT_CACHE_POLL_SECONDS,
         )
         scan_task = self._hass.async_create_task(
-            async_process_advertisements(
+            async_request_active_scan(
                 self._hass,
-                lambda service_info: (
-                    service_info.address.casefold() == address.casefold()
-                ),
-                BluetoothCallbackMatcher(address=address, connectable=True),
-                BluetoothScanningMode.ACTIVE,
                 EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
             ),
             name=f"{DOMAIN}.active_scan.{address}",
@@ -461,29 +489,63 @@ class TtlockBleConnection:
         )
         tasks = (scan_task, closing_task)
         try:
-            done, _pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+            deadline = self._hass.loop.time() + EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS
+            while not self._closing:
+                remaining = deadline - self._hass.loop.time()
+                if remaining <= 0:
+                    break
+                done, _pending = await asyncio.wait(
+                    tasks,
+                    timeout=min(EXPLICIT_CONNECT_CACHE_POLL_SECONDS, remaining),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if self._closing or closing_task in done:
+                    return None
+
+                device = async_ble_device_from_address(
+                    self._hass,
+                    address,
+                    connectable=True,
+                )
+                if device is not None:
+                    service_info = async_last_service_info(
+                        self._hass,
+                        address,
+                        connectable=True,
+                    )
+                    LOGGER.debug(
+                        "Connectable device became available for %s "
+                        "(elapsed=%.1fs, source=%s, RSSI=%s)",
+                        address,
+                        monotonic() - started,
+                        service_info.source if service_info is not None else "unknown",
+                        service_info.rssi if service_info is not None else "unknown",
+                    )
+                    return device
+
+                if scan_task in done:
+                    try:
+                        await scan_task
+                    except Exception:  # noqa: BLE001 -- retain diagnostic fallback
+                        LOGGER.debug(
+                            "Active Bluetooth scan failed for %s",
+                            address,
+                            exc_info=True,
+                        )
+                    else:
+                        LOGGER.debug(
+                            "Active Bluetooth scan ended without a connectable path "
+                            "for %s",
+                            address,
+                        )
+                    return None
+
+            LOGGER.debug(
+                "Active acquisition timed out after %ds for %s",
+                EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+                address,
             )
-            if closing_task in done:
-                return False
-            try:
-                await scan_task
-            except TimeoutError:
-                LOGGER.debug(
-                    "Active Bluetooth scan timed out after %ds for %s",
-                    EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
-                    address,
-                )
-                return False
-            except Exception:  # noqa: BLE001 -- scan failure keeps RC2 fallback
-                LOGGER.debug(
-                    "Active Bluetooth scan failed for %s",
-                    address,
-                    exc_info=True,
-                )
-                return False
-            return not self._closing
+            return None
         finally:
             for task in tasks:
                 if not task.done():

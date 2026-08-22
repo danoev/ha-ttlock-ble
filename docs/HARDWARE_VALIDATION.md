@@ -1,6 +1,6 @@
 # Real-lock hardware-validation runbook
 
-This runbook is for the `3.5.1rc3` prerelease only. It is a hardware
+This runbook is for the `3.5.1rc4` prerelease only. It is a hardware
 validation build, not production-certified. It deliberately uses released
 `ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
 isolated on the SDK development branch.
@@ -56,6 +56,36 @@ sequence:
       device_id: LOCK_DEVICE_ID
     response_variable: auto_lock_result
 ```
+
+## RC4 active-acquisition check
+
+Run this before PIN or auto-lock mutation. It verifies the refined acquisition
+path without requiring the lock to be touched first.
+
+1. Restart Home Assistant with integration debug logging enabled. Confirm the
+   passive advertisement updates state/battery, then wait until the connection
+   entity reports disconnected.
+2. With the lock physically idle, invoke `lock.unlock`. Record the timestamps
+   for request, immediate cache miss/hit, active-acquisition start, connectable
+   cache hit, BLE connection established and command completion. A cache miss
+   may take up to 25 seconds; do not touch or wake the lock during the wait.
+3. Relock through Home Assistant after the connection drops and record the same
+   stages. Require one active-acquisition start at most per command and no
+   repeating scan starts every 0.5 seconds.
+4. Repeat steps 2 and 3 first through the direct adapter, then through the
+   ESPHome active proxy if available. Record source, RSSI, acquisition latency,
+   total command latency and final physical/entity state separately.
+5. Start an unlock while the lock is unavailable, then cancel the service call
+   or unload/reload the integration. Require prompt cancellation, no later
+   connection, no dangling task and no entity left permanently `locking` or
+   `unlocking`.
+6. For one controlled timeout, keep the lock out of range. Require a detailed
+   reachability message rather than a generic error, then return the lock to
+   range and prove the next command succeeds.
+
+The cache polling interval is not a radio polling interval: RC4 requests one
+bounded HA-managed active window and only reads HA's in-memory connectable
+device cache approximately every 0.5 seconds inside it.
 
 ## Initial sequence
 

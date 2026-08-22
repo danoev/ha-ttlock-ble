@@ -123,21 +123,28 @@ def mock_ble_device() -> MagicMock:
 
 @pytest.fixture
 def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
-    """Patch `async_ble_device_from_address` in `connection.py`."""
+    """Patch HA's connectable-device and service-info cache lookups."""
     resolver = MagicMock(return_value=mock_ble_device)
-    with patch(
-        "custom_components.ttlock_ble.connection.async_ble_device_from_address",
-        new=resolver,
+    service_info = MagicMock(source="hci0", rssi=-70)
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.async_ble_device_from_address",
+            new=resolver,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection.async_last_service_info",
+            return_value=service_info,
+        ),
     ):
         yield resolver
 
 
 @pytest.fixture
 def mock_active_scan() -> Generator[AsyncMock]:
-    """Patch the HA-managed one-shot scan to expire immediately by default."""
+    """Patch the HA-managed one-shot active-scan request."""
     active_scan = AsyncMock(side_effect=TimeoutError)
     with patch(
-        "custom_components.ttlock_ble.connection.async_process_advertisements",
+        "custom_components.ttlock_ble.connection.async_request_active_scan",
         new=active_scan,
     ):
         yield active_scan
