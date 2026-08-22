@@ -1,5 +1,13 @@
 # Home Assistant TTLock BLE
 
+> [!IMPORTANT]
+> This is a maintained development fork of
+> [`roquerodrigo/ha-ttlock-ble`](https://github.com/roquerodrigo/ha-ttlock-ble),
+> whose upstream work remains credited and preserved. Report problems specific
+> to this fork to the
+> [`danoev/ha-ttlock-ble` issue tracker](https://github.com/danoev/ha-ttlock-ble/issues),
+> not to the upstream project.
+
 [![CI](https://github.com/roquerodrigo/ha-ttlock-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/roquerodrigo/ha-ttlock-ble/actions/workflows/ci.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
