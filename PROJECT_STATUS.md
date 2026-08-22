@@ -27,7 +27,7 @@ copied into either MIT project.
   [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
   `codex/hardware-validation-0`, created from `codex/management-actions` for
-  the `3.5.1rc5` prerelease candidate. The original repository remains
+  the `3.5.1rc6` prerelease candidate. The original repository remains
   the `upstream` fetch-only remote and
   [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
   `origin`.
@@ -63,6 +63,18 @@ copied into either MIT project.
   GATT/retry path. One HA-managed 25-second active scan remains the fallback
   only when neither representation exists. Background acquisition remains
   non-active and does not use the new explicit scanner-path fallback.
+- RC5 real hardware proved 6/6 physical cold-idle lock/unlock but exposed five
+  false acknowledgement failures, three false later Locked states, and a
+  historical operation-log flood.
+- RC6 adds safe command-stage attribution and a typed post-write unknown
+  outcome. It never resends ambiguous lock/unlock and reconciles only from one
+  fresh connected query.
+- RC6 treats advertisement and decoded short-heartbeat state as hints, records
+  source/age/RSSI for authoritative transitions, and keeps full initial log
+  pages in seed/history mode until a short page completes synchronisation.
+- RC6 changes the persistent exact-address tracker to Passive and uses HA's
+  exact-address `async_process_advertisements` Active wait for explicit misses,
+  allowing the adapter to remain in Auto and preserving proxy routing.
 
 The Home Assistant integration intentionally continues to depend on the
 released `ttlock-ble==0.1.11`. Its passcode and auto-lock actions therefore
@@ -84,8 +96,8 @@ Current local branches:
 
 - `ttlock-ble`: 303 tests passed, 97.31% coverage; Ruff and configured strict
   mypy pass.
-- `ha-ttlock-ble`: 305 tests passed, 99.50% coverage; Ruff and configured mypy
-  pass.
+- `ha-ttlock-ble`: 320 tests passed, 97%+ coverage; Ruff and configured mypy
+  pass locally. Hosted RC6 checks are pending publication.
 - `manifest.json`, `hacs.json`, translation JSON, and `services.yaml` parse;
   the manifest and project versions agree.
 
@@ -101,6 +113,14 @@ the same HACS topics as upstream and Issues enabled; the unchanged HACS job
 passes on rerun. The integration code/layout, manifest, and `hacs.json` checks
 all pass.
 
+HACS derives the displayed integration authors from `manifest.json` at the
+version it has selected for download. Fork prerelease tags use `@danoev`, but
+the fork's default `main` still points at the upstream stable source containing
+`@roquerodrigo`. With prerelease display disabled—or before a forced repository
+refresh clears cached metadata—HACS therefore continues to show the stable
+default-branch author. The RC6 source metadata itself is correct; this is a
+version-selection/cache effect and is non-blocking for Bluetooth validation.
+
 A local Home Assistant `check_config` run is not a faithful gate in this
 workspace because Home Assistant's internal dependency command splits the
 workspace path containing spaces; this is an environment limitation, not a
@@ -111,8 +131,8 @@ passing validation claim.
 The background maintenance loop exists to keep re-establishing a GATT session
 after TTLock's short idle disconnect so SDK push events can be received when a
 session happens to be live. The connection binary sensor also reflects those
-sessions. Passive state and battery do not depend on the loop: advertisements
-already provide both without a GATT connection.
+sessions. Passive battery and state-change hints do not depend on the loop;
+authoritative state now requires a connected query.
 
 Push events do depend on a live authenticated client and are therefore only
 real-time during an open session. Operation logs do not depend on the maintain
@@ -120,7 +140,7 @@ loop itself; they are explicitly read after coordinator state queries and
 successful lock/unlock commands, using whatever connection is available then.
 Removing background sessions would lose live push delivery between on-demand
 connections and could delay log discovery until a later explicit/coordinator
-read, but it would not remove passive state/battery updates or command support.
+read, but it would not remove passive battery/hint updates or command support.
 
 With a roughly five-second idle session and the default 300-second post-drop
 cooldown, the loop can establish on the order of 280 background GATT sessions
@@ -134,13 +154,13 @@ Recommendation: make an on-demand-only mode the preferred low-battery design
 for users who accept losing between-command real-time push events, while
 retaining periodic/persistent listening as an explicit opt-in. The existing
 `permanent_connection` option should remain explicit because reconnecting
-immediately after every idle drop is the highest-drain mode. RC5 deliberately
+immediately after every idle drop is the highest-drain mode. RC6 deliberately
 does not change the maintenance loop or its defaults; that architecture change
 needs separate UX, migration, event-loss and hardware-battery validation.
 
 Advertisement-history clearing was reviewed but is not used. Home Assistant
 documents it for forcing an otherwise identical advertisement to be processed
-as new. RC5 instead reads existing HA aggregate and per-scanner representations;
+as new. RC6 instead reads existing HA aggregate and per-scanner representations;
 the current HA implementation also removes connectable history, so clearing it
 could discard useful state and affect other Bluetooth consumers of that
 address.
@@ -148,11 +168,10 @@ address.
 ## Hardware status
 
 The protocol 5.3 / scene 2 lock at `B6:D4:1E:DB:15:F8` has proved passive
-state/battery, authenticated GATT, and physical lock/unlock through Home
-Assistant. The official iOS app and the integration's background loop have
-also connected from cold idle without keypad touch. RC5's new explicit path is
-not yet repeatability-validated: it requires the documented 10/10 unlock and
-10/10 lock no-touch run before the connection issue can be called solved.
+battery, authenticated GATT, and 6/6 physical cold-idle lock/unlock through Home
+Assistant under RC5. RC6 must now pass the documented Auto-mode 3 Unlock + 3
+Lock smoke test without false failures, state reversal, duplicate commands, or
+historical-log flood, then 10 + 10 before release readiness.
 
 ## Unsupported or intentionally deferred features
 
@@ -185,8 +204,8 @@ not yet repeatability-validated: it requires the documented 10/10 unlock and
 
 ## Next milestone
 
-1. Install the `3.5.1rc5` GitHub prerelease as a HACS custom-repository version
-   and run the exact cold-idle 10 unlock + 10 lock procedure with no physical
-   interaction.
+1. Install the `3.5.1rc6` GitHub prerelease as a HACS custom-repository version
+   and run the exact Auto-mode cold-idle 3 unlock + 3 lock smoke test with no
+   phone/keypad interaction. Expand to 10 + 10 only after it passes.
 2. Do not resume PIN, passage, card, fingerprint, or other feature development
    until that run passes and its sanitized timing/route evidence is reviewed.

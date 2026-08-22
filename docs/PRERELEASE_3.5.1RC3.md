@@ -1,5 +1,8 @@
 # TTLock BLE 3.5.1rc3
 
+> **Superseded for testing by 3.5.1rc6.** This document and tag remain only as
+> a reproducible development artefact.
+
 This is a **hardware-validation-only prerelease**. It is not production
 certified and should be installed only on a lock with a tested recovery route.
 

@@ -145,10 +145,10 @@ def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
 
 @pytest.fixture
 def mock_active_scan() -> Generator[AsyncMock]:
-    """Patch the HA-managed one-shot active-scan request."""
+    """Patch the HA-managed exact-address advertisement wait."""
     active_scan = AsyncMock(side_effect=TimeoutError)
     with patch(
-        "custom_components.ttlock_ble.connection.async_request_active_scan",
+        "custom_components.ttlock_ble.connection.async_process_advertisements",
         new=active_scan,
     ):
         yield active_scan
@@ -172,7 +172,7 @@ def mock_ttlock_client() -> Generator[MagicMock]:
     instance.clear_passcodes = AsyncMock(return_value=None)
     instance.add_event_listener = MagicMock(return_value=None)
     instance.remove_event_listener = MagicMock(return_value=None)
-    with patch("custom_components.ttlock_ble.connection.TTLockClient") as cls:
+    with patch("custom_components.ttlock_ble.connection.TtlockBleClient") as cls:
         cls.from_ble_device = MagicMock(return_value=instance)
         yield instance
 
@@ -193,6 +193,7 @@ def mock_ttlock_connection() -> Generator[MagicMock]:
     instance.async_delete_passcode = AsyncMock(return_value=None)
     instance.async_clear_passcodes = AsyncMock(return_value=None)
     instance.is_connected = True
+    instance.last_connection_rssi = -70
     with patch("custom_components.ttlock_ble.TtlockBleConnection") as cls:
         cls.return_value = instance
         yield instance

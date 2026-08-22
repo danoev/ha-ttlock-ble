@@ -1085,7 +1085,7 @@ wheels = [
 
 [[package]]
 name = "ha-ttlock-ble"
-version = "3.5.1rc5"
+version = "3.5.1rc6"
 source = { virtual = "." }
 
 [package.dev-dependencies]

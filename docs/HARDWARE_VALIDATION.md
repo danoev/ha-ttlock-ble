@@ -1,13 +1,15 @@
 # Real-lock hardware-validation runbook
 
-This runbook is for the `3.5.1rc5` prerelease only. It is a hardware
+This runbook is for the `3.5.1rc6` prerelease only. It is a hardware
 validation build, not production-certified. It deliberately uses released
 `ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
 isolated on the SDK development branch.
 
-RC5 has one release-blocking objective: repeatable cold-idle lock/unlock with
-no physical interaction. Do not run PIN, auto-lock, passage, card, fingerprint,
-or other management mutations during this session.
+RC5 already proved 6/6 physical cold-idle control. RC6 must prove truthful
+command results, physically correct persistent state, silent history seeding,
+and repeatable acquisition with the Home Assistant scanner set to **Auto**.
+Do not run PIN, auto-lock, passage, card, fingerprint, or other management
+mutations during the first RC6 session.
 
 Use disposable PINs that have never protected the door. Keep a mechanical key
 or another verified recovery route available. Do not run `clear_passcodes`,
@@ -62,70 +64,88 @@ sequence:
     response_variable: auto_lock_result
 ```
 
-## RC5 cold-idle repeatability test
+## RC6 command-result and state smoke test
 
 Use the direct USB adapter and present installation first. The target lock is
 `B6:D4:1E:DB:15:F8`, protocol 5.3, scene 2. Do not improve radio placement
 until this baseline is recorded.
 
-1. Close TTLock, LightBlue, and every other phone BLE tool. Disable their
+1. Set the Home Assistant Bluetooth adapter scanning mode to **Auto**, not
+   Active. Close TTLock, LightBlue, and every other phone BLE tool. Disable their
    background access if necessary. Do not touch the keypad, fingerprint reader,
    handle, or lock body during acquisition.
-2. Restart Home Assistant with the safe loggers above. Confirm passive state
-   and battery advertisements arrive, then wait at least three minutes and
-   require the connection entity to be `disconnected` before attempt 1.
-3. Invoke `lock.unlock` once. Record source, RSSI, candidate resolution,
-   candidate-acquisition time, GATT connection time, total command time,
-   physical result, entity result, and pass/fail. A successful result requires
-   the physical lock to unlock with no human interaction at the lock.
-4. Return the lock to the locked starting state through Home Assistant only
-   where practical. Wait for the BLE connection to drop, then leave the lock
-   idle for at least three minutes before the next independent unlock.
-5. Repeat until there are 10 independent cold-idle unlock attempts. Run at
-   least five with the door closed in its normal position and current radio
-   placement. Target: **10/10**. Record median and worst successful latency;
-   bounded acquisition remains 25 seconds.
-6. Starting from an unlocked state, repeat the same disconnected/three-minute
-   idle preparation and measurement for 10 independent Home Assistant lock
-   commands where mechanically meaningful. Target: **10/10** without physical
-   interaction, including at least five door-closed attempts.
-7. Verify logs show at most one active-acquisition request per command, no
-   simultaneous GATT attempts for the lock, and a real SDK connection attempt
-   after either `aggregate connectable history` or `connectable scanner path`
-   resolution. `bleak_retry_connector` debug records connection attempts; do
-   not enable `ttlock_ble.client` debug.
-8. Run one controlled out-of-range timeout. Require the detailed HA
+2. Disable native auto-lock and physically verify it remains disabled. Keep the
+   door closed and the current short USB extension/radio position unchanged.
+3. Restart Home Assistant with the safe loggers above. Allow initial operation
+   log synchronisation to finish. It must create **zero** historical HA events.
+   Confirm passive battery advertisements arrive, then leave the lock untouched
+   and disconnected for at least three minutes before every command.
+4. From Locked, invoke `lock.unlock` once. Record the requested action, route,
+   RSSI, candidate/GATT/total timing, control stage, physical result, HA action
+   result, entity state immediately afterward, and entity state after at least
+   two minutes. Do not use a phone app, keypad, or physical control to prepare
+   or rescue the command.
+5. Repeat step 4 for three independent cold-idle Unlocks. Prepare the locked
+   starting position through Home Assistant only, with a fresh three-minute
+   disconnected idle period before the formal command.
+6. From Unlocked, perform three independent cold-idle Locks with the same
+   preparation and evidence. Native auto-lock must remain disabled.
+7. Require all of the following before expanding the run:
+   - physical operation 6/6;
+   - no false 6-second failure when a fresh connected query positively confirms
+     the requested final state;
+   - no duplicate physical command or second control-frame write after an
+     ambiguous acknowledgement;
+   - entity state remains equal to physical state after every operation;
+   - state-transition logs identify `source=command` or a connected query, with
+     age and RSSI, and no advertisement/push hint directly flips the state;
+   - no historical operation-log flood, and one later real operation emits one
+     event only;
+   - no requirement to change the HA scanner from Auto to global Active.
+8. Verify logs show at most one address-scoped active acquisition per command,
+   no simultaneous GATT attempts for the lock, and a real SDK connection after
+   either aggregate/per-scanner history or the exact-address callback. The
+   active request must be the HA-managed Auto window, not a standalone scanner.
+9. Run one controlled out-of-range timeout. Require the detailed HA
    reachability diagnosis, then restore range and prove a fresh cold-idle
    command succeeds.
-9. Run one cancellation and one integration-unload test while acquisition is
+10. Run one cancellation and one integration-unload test while acquisition is
    pending. Require prompt completion, no late connection/command, no dangling
    task, and no entity stranded in `locking` or `unlocking`.
 
 Use one row per command:
 
-| # | Command | Door | Source | RSSI | Candidate s | GATT s | Total s | Physical/entity result | Pass |
-|---|---|---|---|---:|---:|---:|---:|---|---|
-| 1 | unlock | closed/open | hci0/proxy |  |  |  |  |  |  |
+| # | Command | RSSI | Control stage/result | Physical | HA immediate / +2 min | Log events | Pass |
+|---|---|---:|---|---|---|---:|---|
+| 1 | unlock |  |  |  |  |  |  |
 
-The cache polling interval is not a radio polling interval. RC5 first checks
-HA's aggregate history and per-connectable-scanner records. Only when both are
-empty does it request one bounded HA-managed active window and re-read those
-in-memory representations approximately every 0.5 seconds.
+RC6 first checks HA's aggregate and per-connectable-scanner records. Only when
+both are empty does exact-address `async_process_advertisements()` register a
+connectable callback and ask HA to schedule one bounded Active window. This is
+compatible with the adapter remaining in Auto and with ESPHome active proxies.
 
-Stop on the first unintended physical operation, repeated timeout, late command
-after cancellation, persistent entity transition, or evidence of a secret in
-logs. A result below 10/10 is not a pass; preserve sanitized evidence and do
-not proceed to management features.
+Stop on the first unintended/duplicate physical operation, unreconciled false
+failure, state mismatch, historical event flood, requirement for global Active,
+late command after cancellation, or evidence of a secret in logs. A result
+below 6/6 is not a smoke-test pass.
 
-## Deferred management sequence — do not run for RC5
+## Expanded cold-idle release-readiness test
+
+Only after the six-action smoke test passes, repeat the same Auto-mode,
+three-minute disconnected preparation for **10 Unlocks and 10 Locks**. Require
+20/20 physical operations, truthful action outcomes, stable physical state,
+zero duplicate commands, zero historical flood, and no global Active setting
+before calling the integration release-ready.
+
+## Deferred management sequence — do not run until RC6 smoke passes
 
 ### A. Eight-step baseline
 
 1. Restart Home Assistant; confirm the TTLock device and its lock, battery,
    connection and event entities load without repair/config errors.
 2. Record the lock entity state and battery while the lock is idle.
-3. Operate the lock physically; confirm passive BLE advertisements correct the
-   entity state/battery without Home Assistant opening a command connection.
+3. Operate the lock physically; confirm the advertisement updates battery and a
+   connected query eventually confirms the entity's physical state.
 4. Lock from Home Assistant:
 
    ```yaml

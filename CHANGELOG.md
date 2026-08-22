@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.5.1 hardware-validation development series
+
+This fork-only prerelease series preserves every published tag. **RC1 through
+RC5 are superseded for testing; use RC6.** They remain available solely as
+reproducible development artefacts and their tag history has not been rewritten.
+
+- **RC1** established the isolated hardware-validation branch and prerelease
+  packaging without merging the management branch.
+- **RC2** added Home Assistant Bluetooth reachability diagnostics to missing
+  connectable-device failures, with credential-redaction coverage.
+- **RC3** added bounded HA-managed active acquisition for explicit lock/unlock,
+  passcode, and auto-lock operations.
+- **RC4** refined candidate acquisition and lifecycle handling while preserving
+  the passive/background paths.
+- **RC5** accepted HA per-scanner local/proxy routes before active acquisition;
+  real hardware then proved 6/6 cold-idle physical commands, while exposing
+  false acknowledgement failures, false state reversal, and log backlog flood.
+- **RC6** distinguishes pre-write failure from an ambiguous completed control
+  write, never resends ambiguous lock/unlock, reconciles only through one fresh
+  connected state query, makes advertisement/push state non-authoritative,
+  attributes state transitions, seeds every historical log page silently, and
+  uses an exact-address HA Auto-mode active window with a Passive tracker.
+
 ## [3.5.0](https://github.com/roquerodrigo/ha-ttlock-ble/compare/v3.4.0...v3.5.0) (2026-08-07)
 
 

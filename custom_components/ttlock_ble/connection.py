@@ -21,17 +21,20 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from homeassistant.components.bluetooth import (
+    BluetoothCallbackMatcher,
     BluetoothReachabilityIntent,
+    BluetoothScanningMode,
     async_address_reachability_diagnostics,
     async_ble_device_from_address,
     async_last_service_info,
-    async_request_active_scan,
+    async_process_advertisements,
     async_scanner_devices_by_address,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from ttlock_ble import KeyboardPwdType, TTLockClient, TTLockError
+from ttlock_ble import KeyboardPwdType, LockState, TTLockClient, TTLockError
 
+from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
 
 if TYPE_CHECKING:
@@ -41,13 +44,12 @@ if TYPE_CHECKING:
     from bleak.backends.device import BLEDevice
     from homeassistant.core import HomeAssistant
 
-    from ttlock_ble import LockEvent, LockState, LogEntry, VirtualKey
+    from ttlock_ble import LockEvent, LogEntry, VirtualKey
 
 
 RECONNECT_INITIAL_BACKOFF = 1.0
 RECONNECT_MAX_BACKOFF = 300.0
 EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS = 25
-EXPLICIT_CONNECT_CACHE_POLL_SECONDS = 0.5
 
 # The lock answers the operation log one record per BLE frame, each with
 # its own timeout, and the SDK holds its command lock for the whole
@@ -112,6 +114,7 @@ class TtlockBleConnection:
         self._log_seeded = False
         self._broadcast_connected = False
         self._reachability_diagnostic: str | None = None
+        self._last_connection_rssi: int | None = None
 
     @property
     def key(self) -> VirtualKey:
@@ -122,6 +125,11 @@ class TtlockBleConnection:
     def is_connected(self) -> bool:
         """True iff the underlying `TTLockClient` is currently connected."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def last_connection_rssi(self) -> int | None:
+        """Return the RSSI of the most recently selected HA connection route."""
+        return self._last_connection_rssi
 
     async def async_start(self) -> None:
         """Begin maintaining the BLE connection in the background."""
@@ -288,12 +296,17 @@ class TtlockBleConnection:
                 self._seen_records.add(entry.record_number)
                 new_entries.append(entry)
         if not self._log_seeded:
-            self._log_seeded = True
             LOGGER.debug(
-                "Lock %s: seeded %d existing log records, none dispatched",
+                "Lock %s: seeded %d existing log records from this page, "
+                "none dispatched (page_full=%s)",
                 self._key.lockMac,
                 len(new_entries),
+                len(entries) >= MAX_LOG_ENTRIES_PER_FETCH,
             )
+            # A full bounded page is not proof that history is exhausted.
+            # Keep seeding until the first short/empty page so later historical
+            # pages cannot be mistaken for live operations.
+            self._log_seeded = len(entries) < MAX_LOG_ENTRIES_PER_FETCH
             return []
         if new_entries:
             LOGGER.debug(
@@ -349,6 +362,18 @@ class TtlockBleConnection:
                     self._key.lockMac,
                     monotonic() - started,
                 )
+            except ControlOutcomeUnknownError:
+                if await self._async_reconcile_control_locked(action, client):
+                    LOGGER.info(
+                        "Explicit %s reconciled from a fresh connected state for %s "
+                        "(elapsed=%.1fs; no command retry)",
+                        action,
+                        self._key.lockMac,
+                        monotonic() - started,
+                    )
+                    return
+                await self._async_disconnect_locked()
+                raise
             except TTLockError:
                 await self._async_disconnect_locked()
                 raise
@@ -360,6 +385,51 @@ class TtlockBleConnection:
                 await self._async_disconnect_locked()
                 msg = f"Lock {self._key.lockMac} failed to {action}: {exc}"
                 raise TTLockError(msg) from exc
+
+    async def _async_reconcile_control_locked(
+        self,
+        action: str,
+        client: TTLockClient,
+    ) -> bool:
+        """Confirm an ambiguous write with one fresh state query, never a resend."""
+        if not client.is_connected:
+            await self._async_disconnect_locked()
+            replacement = await self._async_ensure_connected_locked(
+                active_scan=True,
+                reason=f"reconcile ambiguous {action}",
+            )
+            if replacement is None:
+                LOGGER.warning(
+                    "Could not reconcile ambiguous %s for %s: no fresh BLE connection",
+                    action,
+                    self._key.lockMac,
+                )
+                return False
+            client = replacement
+        try:
+            state, _battery = await client.query_state()
+        except Exception as exc:  # noqa: BLE001 -- ambiguity must remain explicit
+            LOGGER.warning(
+                "Could not reconcile ambiguous %s for %s with a fresh state query: %s",
+                action,
+                self._key.lockMac,
+                exc,
+            )
+            return False
+        expected = LockState.LOCKED if action == "lock" else LockState.UNLOCKED
+        matched = state == expected
+        LOGGER.debug(
+            "Ambiguous control reconciliation for %s "
+            "(action=%s, fresh_state=%s, matched=%s, RSSI=%s)",
+            self._key.lockMac,
+            action,
+            state.name if state is not None else "unknown",
+            matched,
+            self._last_connection_rssi
+            if self._last_connection_rssi is not None
+            else "unknown",
+        )
+        return matched
 
     async def _async_run_management_command[T](
         self,
@@ -481,7 +551,7 @@ class TtlockBleConnection:
                 )
         if candidate is None or self._closing_event.is_set():
             return None
-        client = TTLockClient.from_ble_device(
+        client = TtlockBleClient.from_ble_device(
             candidate.device,
             self._key,
             disconnected_callback=self._on_disconnected,
@@ -536,6 +606,7 @@ class TtlockBleConnection:
         )
         client.add_event_listener(self._on_event)
         self._client = client
+        self._last_connection_rssi = candidate.rssi
         self._disconnected.clear()
         self._broadcast_connection_state(connected=True)
         return client
@@ -636,20 +707,34 @@ class TtlockBleConnection:
         *,
         reason: str,
     ) -> _ConnectionCandidate | None:
-        """Run one active scan while polling HA's connectable representations."""
+        """Wait for this address through HA's Auto-mode active-scan scheduler."""
         address = self._key.lockMac
         started = monotonic()
         LOGGER.debug(
-            "Starting active acquisition for %s "
-            "(reason=%s, timeout=%ds, cache_poll=%.1fs)",
+            "Starting address-scoped active acquisition for %s "
+            "(reason=%s, timeout=%ds)",
             address,
             reason,
             EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
-            EXPLICIT_CONNECT_CACHE_POLL_SECONDS,
         )
-        scan_task = self._hass.async_create_task(
-            async_request_active_scan(
+        resolved: list[_ConnectionCandidate] = []
+
+        def _candidate_available(_service_info: object) -> bool:
+            candidate = self._resolve_connection_candidate(
+                include_scanner_paths=True,
+                reason=reason,
+            )
+            if candidate is None:
+                return False
+            resolved.append(candidate)
+            return True
+
+        advertisement_task = self._hass.async_create_task(
+            async_process_advertisements(
                 self._hass,
+                _candidate_available,
+                BluetoothCallbackMatcher(address=address, connectable=True),
+                BluetoothScanningMode.ACTIVE,
                 EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
             ),
             name=f"{DOMAIN}.active_scan.{address}",
@@ -658,62 +743,44 @@ class TtlockBleConnection:
             self._closing_event.wait(),
             name=f"{DOMAIN}.active_scan_stop.{address}",
         )
-        tasks = (scan_task, closing_task)
+        tasks = (advertisement_task, closing_task)
         try:
-            deadline = self._hass.loop.time() + EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS
-            while not self._closing:
-                remaining = deadline - self._hass.loop.time()
-                if remaining <= 0:
-                    break
-                done, _pending = await asyncio.wait(
-                    tasks,
-                    timeout=min(EXPLICIT_CONNECT_CACHE_POLL_SECONDS, remaining),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if self._closing or closing_task in done:
-                    return None
-
-                candidate = self._resolve_connection_candidate(
-                    include_scanner_paths=True,
-                    reason=reason,
-                )
-                if candidate is not None:
-                    LOGGER.debug(
-                        "Connection candidate became available for %s "
-                        "(reason=%s, elapsed=%.1fs, resolution=%s, "
-                        "source=%s, RSSI=%s)",
-                        address,
-                        reason,
-                        monotonic() - started,
-                        candidate.resolution,
-                        candidate.source,
-                        candidate.rssi if candidate.rssi is not None else "unknown",
-                    )
-                    return candidate
-
-                if scan_task in done:
-                    try:
-                        await scan_task
-                    except Exception:  # noqa: BLE001 -- retain diagnostic fallback
-                        LOGGER.debug(
-                            "Active Bluetooth scan failed for %s",
-                            address,
-                            exc_info=True,
-                        )
-                    else:
-                        LOGGER.debug(
-                            "Active Bluetooth scan ended without a connectable path "
-                            "for %s",
-                            address,
-                        )
-                    return None
-
-            LOGGER.debug(
-                "Active acquisition timed out after %ds for %s",
-                EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
-                address,
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            return None
+            if self._closing or closing_task in done:
+                return None
+            try:
+                await advertisement_task
+            except TimeoutError:
+                LOGGER.debug(
+                    "Address-scoped active acquisition timed out after %ds for %s",
+                    EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+                    address,
+                )
+                return None
+            except Exception:  # noqa: BLE001 -- retain diagnostic fallback
+                LOGGER.debug(
+                    "Address-scoped active Bluetooth acquisition failed for %s",
+                    address,
+                    exc_info=True,
+                )
+                return None
+            if not resolved:
+                return None
+            candidate = resolved[-1]
+            LOGGER.debug(
+                "Connection candidate became available for %s "
+                "(reason=%s, elapsed=%.1fs, resolution=%s, source=%s, RSSI=%s)",
+                address,
+                reason,
+                monotonic() - started,
+                candidate.resolution,
+                candidate.source,
+                candidate.rssi if candidate.rssi is not None else "unknown",
+            )
+            return candidate
         finally:
             for task in tasks:
                 if not task.done():

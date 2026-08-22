@@ -1,5 +1,8 @@
 # TTLock BLE 3.5.1rc5
 
+> **Superseded for testing by 3.5.1rc6.** This document and tag remain only as
+> a reproducible development artefact.
+
 This is a **hardware-validation-only prerelease**. It is not production
 certified. Its release gate is repeatable cold-idle, no-touch lock/unlock on the
 real protocol 5.3 / scene 2 lock; management and passage-mode work must remain

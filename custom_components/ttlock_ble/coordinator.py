@@ -6,20 +6,21 @@ a persistent BLE session and pushes events out-of-band). The
 coordinator only owns the periodic state refresh; it does not open BLE
 connections itself.
 
-State also arrives without any poll: `async_apply_advertisement`
-publishes what `TtlockBleAdvertisementTracker` decodes from the lock's
-advertisements, which is the only channel that reports an auto-lock.
+`async_apply_advertisement` publishes battery and tracks the decoded protocol
+state bit as a change hint. Only a connected query publishes authoritative
+lock state; RC5 lacked the source attribution needed to prove the historical
+advertisement-bit persistence assumption on this firmware.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from homeassistant.core import callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-
-from ttlock_ble import LockState
 
 from .const import DOMAIN, LOGGER
 
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
     from homeassistant.core import HomeAssistant
 
-    from ttlock_ble import LockAdvertisement
+    from ttlock_ble import LockAdvertisement, LockState
 
     from .connection import TtlockBleConnection
     from .data import (
@@ -40,6 +41,15 @@ if TYPE_CHECKING:
 
 LOCK_STATE_LOCKED = 0
 LOCK_STATE_UNLOCKED = 1
+
+
+@dataclass(frozen=True, slots=True)
+class StateAttribution:
+    """Safe provenance for the latest authoritative coordinator state."""
+
+    source: str
+    observed_at: float
+    rssi: int | None
 
 
 class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinatorData"]):
@@ -61,6 +71,8 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
             update_interval=scan_interval,
         )
         self._connections = connections
+        self._state_attribution: dict[str, StateAttribution] = {}
+        self._advertisement_hints: dict[str, LockState] = {}
 
     @property
     def connections(self) -> dict[str, TtlockBleConnection]:
@@ -78,23 +90,70 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         self,
         mac: str,
         advertisement: LockAdvertisement,
+        *,
+        rssi: int | None,
     ) -> None:
         """
-        Publish state decoded from a BLE advertisement, without polling the lock.
+        Publish advertised battery and treat bit 0 only as a state-change hint.
 
-        Also reschedules the next poll: a lock that keeps advertising
-        reports itself for free, so there is nothing to connect for.
+        The hint never overwrites an authoritative connected query or command.
+        A changed hint requests a refresh, which resolves physical state through
+        ``SEARCH_BICYCLE_STATUS`` without forcing the scanner globally active.
         """
         LOGGER.debug(
-            "Advertised state for %s (lock_state=%s battery=%d)",
+            "Advertisement hint for %s "
+            "(source=advertisement, hint=%s, battery=%d, RSSI=%s)",
             mac,
             advertisement.lock_state.name,
             advertisement.battery,
+            rssi if rssi is not None else "unknown",
         )
+        previous_hint = self._advertisement_hints.get(mac)
+        self._advertisement_hints[mac] = advertisement.lock_state
+        current = (self.data or {}).get(mac, {})
         snapshot: TtlockBleLockState = {
-            "locked": advertisement.lock_state is LockState.LOCKED,
+            "locked": current.get("locked"),
             "battery_level": advertisement.battery,
         }
+        self.data = {**(self.data or {}), mac: snapshot}
+        self.async_update_listeners()
+        if previous_hint is not None and previous_hint != advertisement.lock_state:
+            LOGGER.debug(
+                "Advertisement hint changed for %s (%s -> %s); requesting "
+                "authoritative query",
+                mac,
+                previous_hint.name,
+                advertisement.lock_state.name,
+            )
+            self.hass.async_create_task(self.async_request_refresh())
+
+    def state_attribution(self, mac: str) -> StateAttribution | None:
+        """Return provenance for the latest authoritative state of ``mac``."""
+        return self._state_attribution.get(mac)
+
+    @callback
+    def async_apply_authoritative_state(
+        self,
+        mac: str,
+        *,
+        locked: bool,
+        battery_level: int | None,
+        source: str,
+        rssi: int | None,
+    ) -> None:
+        """Publish a command or fresh direct-query state with attribution."""
+        current = (self.data or {}).get(mac, {})
+        snapshot: TtlockBleLockState = {
+            "locked": locked,
+            "battery_level": battery_level
+            if battery_level is not None
+            else current.get("battery_level"),
+        }
+        self._state_attribution[mac] = StateAttribution(
+            source=source,
+            observed_at=monotonic(),
+            rssi=rssi,
+        )
         self.async_set_updated_data({**(self.data or {}), mac: snapshot})
 
     async def _async_update_data(self) -> TtlockBleCoordinatorData:
@@ -111,6 +170,13 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
                 state[mac] = {"locked": None, "battery_level": None}
             else:
                 state[mac] = result
+                if result.get("locked") is not None:
+                    connection = self._connections[mac]
+                    self._state_attribution[mac] = StateAttribution(
+                        source="query",
+                        observed_at=monotonic(),
+                        rssi=connection.last_connection_rssi,
+                    )
         return state
 
     async def _async_poll(

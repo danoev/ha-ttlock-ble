@@ -57,10 +57,10 @@ __init__.py      → instantiates one TtlockBleConnection per lock and a
                     DataUpdateCoordinator, performs the first refresh
 connection.py    → owns the long-lived BLE session, reconnect loop,
                     cooldown, and push-event dispatch
-advertisement.py → decodes lock state + battery from the advertisements
-                    HA's bluetooth manager already receives, no connection
+advertisement.py → decodes passive battery + a non-authoritative state hint
+                    from advertisements HA already receives, no connection
 coordinator.py   → polls every scan_interval seconds via each connection,
-                    and publishes the advertised state as it arrives
+                    publishes authoritative queried state and hint battery
 lock.py          → LockEntity backed by the BLE connection
 sensor.py        → BatterySensor backed by the same poll + push events
 binary_sensor.py → connectivity BinarySensorEntity reflecting live BLE link state
@@ -123,19 +123,17 @@ Every cloud call in the flow, `_async_fetch_keys` included, maps its exceptions 
 - A reconnect maintain loop driven by an `asyncio.Event` the SDK's `disconnected_callback` toggles.
 - A post-drop cooldown: after any disconnect, sleeps the `reconnect_cooldown_seconds` the constructor received (from the `reconnect_interval` option; `0` when `permanent_connection` is on) before reconnecting — no immediate retry unless configured so. **The cooldown paces that loop only.** It used to also veto `async_query_state`, and since the lock drops every idle session within seconds the loop re-armed it constantly, so the configured `scan_interval` never actually ran a poll (issue #42). Reads are rate-limited by their own callers instead.
 - A dispatcher forwarder: any push event the SDK emits is fanned out on `ttlock_ble_event_<mac>` so the lock, sensor, and event entities can subscribe. The BLE drop is announced from bleak's own callback, not from the teardown that follows the cooldown, so the connectivity sensor does not claim a live link for five minutes after the link died.
-- Backlog seeding: the first operation-log fetch that actually reaches the lock only fills `_seen_records` and dispatches nothing. The lock returns everything unsynced since its last cursor sync, and replaying that history as live events would fire automations for unlocks from days ago. Tying it to a *successful* fetch matters — a lock out of range at startup must not spend its seeding pass on a poll that read nothing.
+- Backlog seeding: every full initial operation-log page only fills `_seen_records` and dispatches nothing. Seeding completes after the first successful short or empty page, so pagination cannot turn later history into live events. A lock out of range at startup must not spend its seeding pass on a poll that read nothing.
 - A refusal to reconnect after `async_stop`: a late caller would otherwise take the lock's single central slot with no maintain loop left to release it.
 
 ### Passive advertisement tracking
 
-`advertisement.py` defines `TtlockBleAdvertisementTracker`, subscribed per MAC through HA's `async_register_callback`. The firmware folds the bolt position, a "new records pending" flag and the battery percentage into the manufacturer data of every advertisement, so `LockAdvertisement.from_manufacturer_data` (SDK) turns them into state for free.
-
-This is the **only** channel that reports an auto-lock: the firmware writes no operation-log record for it, and the lock drops the BLE session it pushes events on within seconds of going idle. The same applies to anything done from the official app or the keypad while we are not connected.
+`advertisement.py` defines `TtlockBleAdvertisementTracker`, subscribed per MAC through HA's `async_register_callback` in Passive mode. The SDK decodes manufacturer-data battery and protocol bit 0, historically named `isUnlock`. RC5 did not attribute its false Locked transitions between that bit and decoded short push state, so neither is permitted to overwrite a fresh connected query.
 
 Two details are load-bearing:
 
 - The decoded trailing address must equal the lock's MAC. A payload long enough to decode is not proof it is a TTLock payload, and that address is the only field whose value can be checked independently.
-- An advertisement that decodes reaches the entities via `async_set_updated_data`, which also **reschedules** the next poll — a lock that keeps advertising is never connected to just to be read.
+- A decoded advertisement updates battery without rescheduling the authoritative coordinator poll. A changed hint requests a connected query; it never writes `locked` directly.
 
 An advertisement we cannot decode falls back to a coordinator refresh, but only while no state is known yet: that bootstrap is what makes the entity available seconds after HA boots instead of after a full `scan_interval`. Refreshing on *every* advertisement (the old behaviour) is what made the cooldown look necessary in the first place.
 
@@ -149,7 +147,7 @@ The diagnostics dump carries the last advertisement per lock, raw bytes included
 - `_command_lock` serializes the bookkeeping. The BLE layer's lock orders the round trips only; without an entity-level one, the first of two concurrent commands to finish published a settled state while the second was still turning the bolt.
 - `jammed`, `open` and `opening` are never reported. The firmware exposes no jam signal — only a bolt position and a success/failure byte — and has no latch command distinct from unlocking, so any value there would be a guess.
 
-`connection.py` converts everything that is not already a `TTLockError` into one, because the SDK's command path leaks `BleakError` from an unwrapped `write_gatt_char`, a bare `RuntimeError` from a rejected `checkUserTime`, and `ValueError` from the decrypt step.
+`client.py` subclasses the pinned SDK narrowly to attribute authentication, complete control write, response routing, acknowledgement, and disconnect stages. A complete control write followed by acknowledgement loss becomes `ControlOutcomeUnknownError`; `connection.py` never resends it and may reconcile only with one fresh connected query. Other escapes are still converted to `TTLockError` at the connection boundary.
 
 ### Event entity
 
