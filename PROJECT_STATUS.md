@@ -27,7 +27,7 @@ copied into either MIT project.
   [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
   `codex/hardware-validation-0`, created from `codex/management-actions` for
-  the `3.5.1rc2` prerelease candidate. The original repository remains
+  the `3.5.1rc3` prerelease candidate. The original repository remains
   the `upstream` fetch-only remote and
   [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
   `origin`.
@@ -137,7 +137,7 @@ request/result evidence.
 
 ## Next milestone
 
-1. Install the `3.5.1rc2` GitHub prerelease as a HACS custom-repository
+1. Install the `3.5.1rc3` GitHub prerelease as a HACS custom-repository
    version and run the baseline plus passcode/auto-lock portions of the
    hardware checklist.
 2. Capture capability bytes and sanitized passage-mode responses, convert them

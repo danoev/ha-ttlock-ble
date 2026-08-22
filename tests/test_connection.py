@@ -6,11 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from homeassistant.components.bluetooth import BluetoothReachabilityIntent
+from homeassistant.components.bluetooth import (
+    BluetoothReachabilityIntent,
+    BluetoothScanningMode,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from ttlock_ble import KeyboardPwdType, LockEvent, TTLockError
 
 from custom_components.ttlock_ble.connection import (
+    EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
     TtlockBleConnection,
     connection_signal,
     event_signal,
@@ -49,11 +53,13 @@ async def test_query_state_returns_none_when_device_missing(
     sample_virtual_key,
     mock_ble_resolver,
     mock_ttlock_client,
+    mock_active_scan,
 ) -> None:
     mock_ble_resolver.return_value = None
     conn = TtlockBleConnection(hass, sample_virtual_key)
     assert await conn.async_query_state() is None
     mock_ttlock_client.connect.assert_not_awaited()
+    mock_active_scan.assert_not_awaited()
 
 
 async def test_missing_device_logs_reachability_diagnostic(
@@ -95,8 +101,9 @@ async def test_missing_device_propagates_reachability_diagnostic_to_command(
     hass,
     sample_virtual_key,
     mock_ble_resolver,
+    mock_active_scan,
 ) -> None:
-    """A command keeps its TTLockError contract and includes the safe diagnosis."""
+    """A scan timeout keeps TTLockError and includes HA's safe diagnosis."""
     mock_ble_resolver.return_value = None
     diagnostic = "only in non-connectable history (no connectable path)"
     with patch(
@@ -114,6 +121,7 @@ async def test_missing_device_propagates_reachability_diagnostic_to_command(
         BluetoothReachabilityIntent.CONNECTION,
     )
     assert diagnostic in str(error.value)
+    mock_active_scan.assert_awaited_once()
     for credential in (
         sample_virtual_key.aesKeyStr,
         sample_virtual_key.unlockKey,
@@ -126,6 +134,7 @@ async def test_missing_device_propagates_diagnostic_without_management_secret(
     hass,
     sample_virtual_key,
     mock_ble_resolver,
+    mock_active_scan,
 ) -> None:
     """Management failures include HA's diagnosis but never the submitted PIN."""
     mock_ble_resolver.return_value = None
@@ -146,6 +155,7 @@ async def test_missing_device_propagates_diagnostic_without_management_secret(
             )
 
     assert diagnostic in str(error.value)
+    mock_active_scan.assert_awaited_once()
     assert secret_code not in str(error.value)
     for credential in (
         sample_virtual_key.aesKeyStr,
@@ -227,10 +237,150 @@ async def test_lock_happy(
     sample_virtual_key,
     mock_ble_resolver,
     mock_ttlock_client,
+    mock_active_scan,
 ) -> None:
     conn = TtlockBleConnection(hass, sample_virtual_key)
     await conn.async_lock()
     mock_ttlock_client.lock.assert_awaited_once()
+    mock_active_scan.assert_not_awaited()
+
+
+async def test_explicit_command_active_scans_then_resolves_connectable_device(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """An exact connectable advertisement lets the existing client path continue."""
+    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    mock_active_scan.side_effect = None
+    mock_active_scan.return_value = SimpleNamespace(address=sample_virtual_key.lockMac)
+
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    await conn.async_lock()
+
+    assert mock_ble_resolver.call_count == 2
+    for call in mock_ble_resolver.call_args_list:
+        assert call.args == (hass, sample_virtual_key.lockMac)
+        assert call.kwargs == {"connectable": True}
+    mock_active_scan.assert_awaited_once()
+    scan_args = mock_active_scan.await_args.args
+    assert scan_args[0] is hass
+    assert scan_args[1](SimpleNamespace(address=sample_virtual_key.lockMac)) is True
+    assert scan_args[1](SimpleNamespace(address="00:00:00:00:00:00")) is False
+    assert scan_args[2] == {
+        "address": sample_virtual_key.lockMac,
+        "connectable": True,
+    }
+    assert scan_args[3] is BluetoothScanningMode.ACTIVE
+    assert scan_args[4] == EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS == 25
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_awaited_once()
+
+
+async def test_unload_interrupts_explicit_active_scan(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Unload does not wait out the scan timeout or open a late connection."""
+    mock_ble_resolver.return_value = None
+    scan_started = asyncio.Event()
+    scan_cancelled = asyncio.Event()
+
+    async def _wait_for_advertisement(*_args) -> None:
+        scan_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            scan_cancelled.set()
+
+    active_scan = AsyncMock(side_effect=_wait_for_advertisement)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_process_advertisements",
+        new=active_scan,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        operation = asyncio.create_task(conn.async_lock())
+        await asyncio.wait_for(scan_started.wait(), timeout=1)
+        await asyncio.wait_for(conn.async_stop(), timeout=1)
+        with pytest.raises(TTLockError, match="not reachable"):
+            await operation
+
+    assert scan_cancelled.is_set()
+    mock_ttlock_client.connect.assert_not_awaited()
+
+
+async def test_explicit_operation_cancellation_cleans_up_active_scan(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Cancelling the user operation also cancels its HA scan waiter."""
+    mock_ble_resolver.return_value = None
+    scan_started = asyncio.Event()
+    scan_cancelled = asyncio.Event()
+
+    async def _wait_for_advertisement(*_args) -> None:
+        scan_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            scan_cancelled.set()
+
+    active_scan = AsyncMock(side_effect=_wait_for_advertisement)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_process_advertisements",
+        new=active_scan,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        operation = asyncio.create_task(conn.async_unlock())
+        await asyncio.wait_for(scan_started.wait(), timeout=1)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+    assert scan_cancelled.is_set()
+    mock_ttlock_client.connect.assert_not_awaited()
+
+
+async def test_simultaneous_commands_share_one_active_scan(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """The per-lock operation mutex prevents duplicate simultaneous scans."""
+    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    scan_started = asyncio.Event()
+    release_scan = asyncio.Event()
+
+    async def _wait_for_advertisement(*_args) -> SimpleNamespace:
+        scan_started.set()
+        await release_scan.wait()
+        return SimpleNamespace(address=sample_virtual_key.lockMac)
+
+    active_scan = AsyncMock(side_effect=_wait_for_advertisement)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_process_advertisements",
+        new=active_scan,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        lock_task = asyncio.create_task(conn.async_lock())
+        unlock_task = asyncio.create_task(conn.async_unlock())
+        await asyncio.wait_for(scan_started.wait(), timeout=1)
+        release_scan.set()
+        await asyncio.gather(lock_task, unlock_task)
+
+    active_scan.assert_awaited_once()
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_awaited_once()
 
 
 async def test_unlock_happy(
@@ -255,6 +405,26 @@ async def test_auto_lock_management(
     await conn.async_set_auto_lock_time(0)
     mock_ttlock_client.get_auto_lock_time.assert_awaited_once()
     mock_ttlock_client.set_auto_lock_time.assert_awaited_once_with(0)
+
+
+async def test_auto_lock_management_active_scans_when_initially_missing(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Auto-lock actions opt into the same one-shot connectable scan."""
+    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    mock_active_scan.side_effect = None
+    mock_active_scan.return_value = SimpleNamespace(address=sample_virtual_key.lockMac)
+
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    assert await conn.async_get_auto_lock_time() == 30
+
+    mock_active_scan.assert_awaited_once()
+    mock_ttlock_client.get_auto_lock_time.assert_awaited_once()
 
 
 async def test_passcode_management(
@@ -288,6 +458,25 @@ async def test_passcode_management(
     mock_ttlock_client.clear_passcodes.assert_awaited_once()
 
 
+async def test_clear_passcodes_does_not_trigger_active_scan(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_active_scan,
+) -> None:
+    """The destructive clear action is outside the initial active-scan scope."""
+    mock_ble_resolver.return_value = None
+    with patch(
+        "custom_components.ttlock_ble.connection."
+        "async_address_reachability_diagnostics",
+        return_value="unknown (never seen by any scanner)",
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        with pytest.raises(TTLockError, match="not reachable"):
+            await conn.async_clear_passcodes()
+    mock_active_scan.assert_not_awaited()
+
+
 async def test_management_error_does_not_echo_passcode(
     hass,
     sample_virtual_key,
@@ -311,6 +500,7 @@ async def test_lock_raises_when_device_missing(
     hass,
     sample_virtual_key,
     mock_ble_resolver,
+    mock_active_scan,
 ) -> None:
     mock_ble_resolver.return_value = None
     conn = TtlockBleConnection(hass, sample_virtual_key)
@@ -412,6 +602,7 @@ async def test_maintain_loop_keeps_trying_when_device_missing(
     sample_virtual_key,
     mock_ble_resolver,
     mock_ttlock_client,
+    mock_active_scan,
 ) -> None:
     mock_ble_resolver.return_value = None
     conn = TtlockBleConnection(hass, sample_virtual_key)
@@ -425,6 +616,7 @@ async def test_maintain_loop_keeps_trying_when_device_missing(
         await conn.async_stop()
     # The resolver must have been hit multiple times by the maintain loop.
     assert mock_ble_resolver.call_count >= 2
+    mock_active_scan.assert_not_awaited()
 
 
 async def test_maintain_loop_logs_unexpected_error(

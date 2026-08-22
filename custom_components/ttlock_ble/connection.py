@@ -19,9 +19,12 @@ import contextlib
 from typing import TYPE_CHECKING
 
 from homeassistant.components.bluetooth import (
+    BluetoothCallbackMatcher,
     BluetoothReachabilityIntent,
+    BluetoothScanningMode,
     async_address_reachability_diagnostics,
     async_ble_device_from_address,
+    async_process_advertisements,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -40,6 +43,7 @@ if TYPE_CHECKING:
 
 RECONNECT_INITIAL_BACKOFF = 1.0
 RECONNECT_MAX_BACKOFF = 300.0
+EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS = 25
 
 # The lock answers the operation log one record per BLE frame, each with
 # its own timeout, and the SDK holds its command lock for the whole
@@ -88,6 +92,7 @@ class TtlockBleConnection:
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
+        self._closing_event = asyncio.Event()
         self._disconnected = asyncio.Event()
         self._seen_records: set[int] = set()
         self._log_seeded = False
@@ -109,6 +114,7 @@ class TtlockBleConnection:
         if self._task is not None:
             return
         self._closing = False
+        self._closing_event.clear()
         self._task = self._hass.async_create_background_task(
             self._async_maintain(),
             name=f"ttlock_ble.connection.{self._key.lockMac}",
@@ -117,6 +123,7 @@ class TtlockBleConnection:
     async def async_stop(self) -> None:
         """Cancel the background loop and release the BLE connection."""
         self._closing = True
+        self._closing_event.set()
         self._disconnected.set()
         if self._task is not None:
             self._task.cancel()
@@ -164,6 +171,7 @@ class TtlockBleConnection:
         return await self._async_run_management_command(
             "read auto-lock delay",
             lambda client: client.get_auto_lock_time(),
+            active_scan=True,
         )
 
     async def async_set_auto_lock_time(self, seconds: int) -> None:
@@ -171,6 +179,7 @@ class TtlockBleConnection:
         await self._async_run_management_command(
             "set auto-lock delay",
             lambda client: client.set_auto_lock_time(seconds),
+            active_scan=True,
         )
 
     async def async_add_passcode(
@@ -190,6 +199,7 @@ class TtlockBleConnection:
                 start_date=start_date,
                 end_date=end_date,
             ),
+            active_scan=True,
         )
 
     async def async_delete_passcode(
@@ -202,6 +212,7 @@ class TtlockBleConnection:
         await self._async_run_management_command(
             "delete passcode",
             lambda client: client.delete_passcode(code, pwd_type=pwd_type),
+            active_scan=True,
         )
 
     async def async_clear_passcodes(self) -> None:
@@ -209,6 +220,7 @@ class TtlockBleConnection:
         await self._async_run_management_command(
             "clear passcodes",
             lambda client: client.clear_passcodes(),
+            active_scan=False,
         )
 
     async def async_get_operation_log(self) -> list[LogEntry]:
@@ -297,7 +309,7 @@ class TtlockBleConnection:
         `RuntimeError`, so it has to be caught first.
         """
         async with self._lock:
-            client = await self._async_ensure_connected_locked()
+            client = await self._async_ensure_connected_locked(active_scan=True)
             if client is None:
                 msg = f"Lock {self._key.lockMac} not reachable via Bluetooth"
                 if self._reachability_diagnostic is not None:
@@ -324,10 +336,12 @@ class TtlockBleConnection:
         self,
         action: str,
         operation: Callable[[TTLockClient], Awaitable[T]],
+        *,
+        active_scan: bool,
     ) -> T:
         """Run management without including its secret inputs in errors."""
         async with self._lock:
-            client = await self._async_ensure_connected_locked()
+            client = await self._async_ensure_connected_locked(active_scan=active_scan)
             if client is None:
                 msg = f"Lock {self._key.lockMac} is not reachable via Bluetooth"
                 if self._reachability_diagnostic is not None:
@@ -347,7 +361,11 @@ class TtlockBleConnection:
                 msg = f"Lock {self._key.lockMac} failed to {action}"
                 raise TTLockError(msg) from exc
 
-    async def _async_ensure_connected_locked(self) -> TTLockClient | None:
+    async def _async_ensure_connected_locked(
+        self,
+        *,
+        active_scan: bool = False,
+    ) -> TTLockClient | None:
         """
         Return a live client, opening a new BLE session if needed.
 
@@ -368,7 +386,19 @@ class TtlockBleConnection:
             self._key.lockMac,
             connectable=True,
         )
+        if (
+            device is None
+            and active_scan
+            and await self._async_wait_for_connectable_advertisement_locked()
+        ):
+            device = async_ble_device_from_address(
+                self._hass,
+                self._key.lockMac,
+                connectable=True,
+            )
         if device is None:
+            if self._closing_event.is_set():
+                return None
             try:
                 diagnostic = async_address_reachability_diagnostics(
                     self._hass,
@@ -404,6 +434,61 @@ class TtlockBleConnection:
         self._disconnected.clear()
         self._broadcast_connection_state(connected=True)
         return client
+
+    async def _async_wait_for_connectable_advertisement_locked(self) -> bool:
+        """Actively wait once for this lock during an explicit user operation."""
+        address = self._key.lockMac
+        LOGGER.debug(
+            "Lock %s has no connectable path; actively scanning for up to %ds",
+            address,
+            EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+        )
+        scan_task = self._hass.async_create_task(
+            async_process_advertisements(
+                self._hass,
+                lambda service_info: (
+                    service_info.address.casefold() == address.casefold()
+                ),
+                BluetoothCallbackMatcher(address=address, connectable=True),
+                BluetoothScanningMode.ACTIVE,
+                EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+            ),
+            name=f"{DOMAIN}.active_scan.{address}",
+        )
+        closing_task = self._hass.async_create_task(
+            self._closing_event.wait(),
+            name=f"{DOMAIN}.active_scan_stop.{address}",
+        )
+        tasks = (scan_task, closing_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if closing_task in done:
+                return False
+            try:
+                await scan_task
+            except TimeoutError:
+                LOGGER.debug(
+                    "Active Bluetooth scan timed out after %ds for %s",
+                    EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+                    address,
+                )
+                return False
+            except Exception:  # noqa: BLE001 -- scan failure keeps RC2 fallback
+                LOGGER.debug(
+                    "Active Bluetooth scan failed for %s",
+                    address,
+                    exc_info=True,
+                )
+                return False
+            return not self._closing
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _async_disconnect_locked(self) -> None:
         """Tear down the BLE session if up. Caller must hold `self._lock`."""

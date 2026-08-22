@@ -133,6 +133,17 @@ def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
 
 
 @pytest.fixture
+def mock_active_scan() -> Generator[AsyncMock]:
+    """Patch the HA-managed one-shot scan to expire immediately by default."""
+    active_scan = AsyncMock(side_effect=TimeoutError)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_process_advertisements",
+        new=active_scan,
+    ):
+        yield active_scan
+
+
+@pytest.fixture
 def mock_ttlock_client() -> Generator[MagicMock]:
     """Patch `TTLockClient.from_ble_device` returning a controllable mock."""
     instance = MagicMock(name="TTLockClient")
