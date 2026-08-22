@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from homeassistant.components.bluetooth import BluetoothReachabilityIntent
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from ttlock_ble import KeyboardPwdType, LockEvent, TTLockError
 
@@ -51,6 +53,123 @@ async def test_query_state_returns_none_when_device_missing(
     mock_ble_resolver.return_value = None
     conn = TtlockBleConnection(hass, sample_virtual_key)
     assert await conn.async_query_state() is None
+    mock_ttlock_client.connect.assert_not_awaited()
+
+
+async def test_missing_device_logs_reachability_diagnostic(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    caplog,
+) -> None:
+    """A missing device reports HA's scanner/path explanation at debug level."""
+    mock_ble_resolver.return_value = None
+    diagnostic = "unknown; 2 scanners registered, 1 scanning, 1 connectable"
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection."
+            "async_address_reachability_diagnostics",
+            return_value=diagnostic,
+        ) as reachability,
+        caplog.at_level(logging.DEBUG, logger="custom_components.ttlock_ble"),
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        assert await conn.async_query_state() is None
+
+    reachability.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+        BluetoothReachabilityIntent.CONNECTION,
+    )
+    assert diagnostic in caplog.text
+    for credential in (
+        sample_virtual_key.aesKeyStr,
+        sample_virtual_key.unlockKey,
+        sample_virtual_key.adminPs,
+    ):
+        assert credential not in caplog.text
+
+
+async def test_missing_device_propagates_reachability_diagnostic_to_command(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+) -> None:
+    """A command keeps its TTLockError contract and includes the safe diagnosis."""
+    mock_ble_resolver.return_value = None
+    diagnostic = "only in non-connectable history (no connectable path)"
+    with patch(
+        "custom_components.ttlock_ble.connection."
+        "async_address_reachability_diagnostics",
+        return_value=diagnostic,
+    ) as reachability:
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        with pytest.raises(TTLockError) as error:
+            await conn.async_lock()
+
+    reachability.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+        BluetoothReachabilityIntent.CONNECTION,
+    )
+    assert diagnostic in str(error.value)
+    for credential in (
+        sample_virtual_key.aesKeyStr,
+        sample_virtual_key.unlockKey,
+        sample_virtual_key.adminPs,
+    ):
+        assert credential not in str(error.value)
+
+
+async def test_missing_device_propagates_diagnostic_without_management_secret(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+) -> None:
+    """Management failures include HA's diagnosis but never the submitted PIN."""
+    mock_ble_resolver.return_value = None
+    diagnostic = "connectable scanner paths are full"
+    secret_code = "583921"
+    with patch(
+        "custom_components.ttlock_ble.connection."
+        "async_address_reachability_diagnostics",
+        return_value=diagnostic,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        with pytest.raises(TTLockError) as error:
+            await conn.async_add_passcode(
+                secret_code,
+                pwd_type=KeyboardPwdType.PERMANENT,
+                start_date="0001311400",
+                end_date="9912311400",
+            )
+
+    assert diagnostic in str(error.value)
+    assert secret_code not in str(error.value)
+    for credential in (
+        sample_virtual_key.aesKeyStr,
+        sample_virtual_key.unlockKey,
+        sample_virtual_key.adminPs,
+    ):
+        assert credential not in str(error.value)
+
+
+async def test_reachability_diagnostic_failure_preserves_missing_device_behavior(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A diagnostic failure cannot replace the original missing-device result."""
+    mock_ble_resolver.return_value = None
+    with patch(
+        "custom_components.ttlock_ble.connection."
+        "async_address_reachability_diagnostics",
+        side_effect=RuntimeError("diagnostics unavailable"),
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        assert await conn.async_query_state() is None
     mock_ttlock_client.connect.assert_not_awaited()
 
 

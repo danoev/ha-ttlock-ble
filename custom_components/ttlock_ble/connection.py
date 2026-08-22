@@ -18,7 +18,11 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING
 
-from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.components.bluetooth import (
+    BluetoothReachabilityIntent,
+    async_address_reachability_diagnostics,
+    async_ble_device_from_address,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from ttlock_ble import KeyboardPwdType, TTLockClient, TTLockError
@@ -88,6 +92,7 @@ class TtlockBleConnection:
         self._seen_records: set[int] = set()
         self._log_seeded = False
         self._broadcast_connected = False
+        self._reachability_diagnostic: str | None = None
 
     @property
     def key(self) -> VirtualKey:
@@ -295,6 +300,8 @@ class TtlockBleConnection:
             client = await self._async_ensure_connected_locked()
             if client is None:
                 msg = f"Lock {self._key.lockMac} not reachable via Bluetooth"
+                if self._reachability_diagnostic is not None:
+                    msg = f"{msg}: {self._reachability_diagnostic}"
                 raise TTLockError(msg)
             try:
                 if action == "lock":
@@ -323,6 +330,8 @@ class TtlockBleConnection:
             client = await self._async_ensure_connected_locked()
             if client is None:
                 msg = f"Lock {self._key.lockMac} is not reachable via Bluetooth"
+                if self._reachability_diagnostic is not None:
+                    msg = f"{msg}: {self._reachability_diagnostic}"
                 raise TTLockError(msg)
             try:
                 return await operation(client)
@@ -348,6 +357,7 @@ class TtlockBleConnection:
         lock's single central slot with nobody left to close it, and
         block the connection the reloaded entry is trying to make.
         """
+        self._reachability_diagnostic = None
         if self._closing:
             return None
         if self._client is not None and self._client.is_connected:
@@ -359,6 +369,25 @@ class TtlockBleConnection:
             connectable=True,
         )
         if device is None:
+            try:
+                diagnostic = async_address_reachability_diagnostics(
+                    self._hass,
+                    self._key.lockMac,
+                    BluetoothReachabilityIntent.CONNECTION,
+                )
+            except Exception:  # noqa: BLE001 -- diagnostics must not mask failure
+                LOGGER.debug(
+                    "Could not build Bluetooth reachability diagnostics for %s",
+                    self._key.lockMac,
+                    exc_info=True,
+                )
+            else:
+                self._reachability_diagnostic = diagnostic
+                LOGGER.debug(
+                    "Lock %s is not reachable via Bluetooth: %s",
+                    self._key.lockMac,
+                    diagnostic,
+                )
             return None
         client = TTLockClient.from_ble_device(
             device,

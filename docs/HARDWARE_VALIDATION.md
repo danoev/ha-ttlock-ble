@@ -1,6 +1,6 @@
 # Real-lock hardware-validation runbook
 
-This runbook is for the `3.5.1rc1` prerelease only. It is a hardware
+This runbook is for the `3.5.1rc2` prerelease only. It is a hardware
 validation build, not production-certified. It deliberately uses released
 `ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
 isolated on the SDK development branch.
