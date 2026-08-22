@@ -1,15 +1,16 @@
 # Real-lock hardware-validation runbook
 
-This runbook is for the `3.5.1rc6` prerelease only. It is a hardware
+This runbook is for the `3.5.1rc7` prerelease only. It is a hardware
 validation build, not production-certified. It deliberately uses released
 `ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
 isolated on the SDK development branch.
 
-RC5 already proved 6/6 physical cold-idle control. RC6 must prove truthful
-command results, physically correct persistent state, silent history seeding,
-and repeatable acquisition with the Home Assistant scanner set to **Auto**.
+RC5 already proved 6/6 physical cold-idle control. RC7 must first prove that
+startup can bootstrap Unknown to an authoritative physical state with the Home
+Assistant scanner set to **Auto**, then retain RC6's truthful command results,
+physically correct persistent state, silent history seeding, and acquisition.
 Do not run PIN, auto-lock, passage, card, fingerprint, or other management
-mutations during the first RC6 session.
+mutations during the first RC7 session.
 
 Use disposable PINs that have never protected the door. Keep a mechanical key
 or another verified recovery route available. Do not run `clear_passcodes`,
@@ -64,7 +65,36 @@ sequence:
     response_variable: auto_lock_result
 ```
 
-## RC6 command-result and state smoke test
+## RC7 authoritative startup bootstrap
+
+1. Keep the Home Assistant Bluetooth adapter set to **Auto**. Close TTLock,
+   LightBlue, and other phone BLE tools. Do not use a global Active setting.
+2. Physically establish and record the lock's starting position. Leave the
+   lock untouched and disconnected for at least three minutes; do not prime it
+   with `get_auto_lock`, a keypad, a phone app, or another management action.
+3. Restart Home Assistant or reload the TTLock BLE config entry. Record the
+   lock entity's startup state, active-acquisition start/result, selected HA
+   route, RSSI, GATT connection, authoritative query, and final state.
+4. Require exactly one bounded exact-address HA-managed Active acquisition
+   when no cached/per-scanner connectable candidate exists. No simultaneous
+   GATT attempts or standalone Bleak scanner may appear.
+5. Require the connected query to change Unknown to the lock's physically
+   verified Locked or Unlocked state. Advertisement and short-push hints may
+   update battery or trigger the query, but must not write physical state.
+6. Repeat once from the opposite physical state. Then use
+   `homeassistant.update_entity` once after allowing the route to disappear;
+   require the same bounded acquisition and authoritative result.
+7. For the timeout case, move the lock out of range and reload the entry. The
+   bounded wait must finish without a false Locked/Unlocked state, late GATT
+   attempt, or credential-bearing log line. Restore range before continuing.
+8. After state is known, observe one ordinary scheduled poll. It must not ask
+   HA for an Active window solely because the routine interval elapsed.
+
+Stop if startup remains Unknown while a valid route was acquired, a hint writes
+state directly, more than one concurrent scan/GATT attempt occurs, the scanner
+must be switched globally Active, or a timeout invents physical state.
+
+## RC7 command-result and state smoke test
 
 Use the direct USB adapter and present installation first. The target lock is
 `B6:D4:1E:DB:15:F8`, protocol 5.3, scene 2. Do not improve radio placement
@@ -76,8 +106,9 @@ until this baseline is recorded.
    handle, or lock body during acquisition.
 2. Disable native auto-lock and physically verify it remains disabled. Keep the
    door closed and the current short USB extension/radio position unchanged.
-3. Restart Home Assistant with the safe loggers above. Allow initial operation
-   log synchronisation to finish. It must create **zero** historical HA events.
+3. Restart Home Assistant with the safe loggers above and pass the RC7 startup
+   bootstrap above. Allow initial operation log synchronisation to finish. It
+   must create **zero** historical HA events.
    Confirm passive battery advertisements arrive, then leave the lock untouched
    and disconnected for at least three minutes before every command.
 4. From Locked, invoke `lock.unlock` once. Record the requested action, route,
@@ -119,7 +150,7 @@ Use one row per command:
 |---|---|---:|---|---|---|---:|---|
 | 1 | unlock |  |  |  |  |  |  |
 
-RC6 first checks HA's aggregate and per-connectable-scanner records. Only when
+RC7 first checks HA's aggregate and per-connectable-scanner records. Only when
 both are empty does exact-address `async_process_advertisements()` register a
 connectable callback and ask HA to schedule one bounded Active window. This is
 compatible with the adapter remaining in Auto and with ESPHome active proxies.
@@ -137,7 +168,7 @@ three-minute disconnected preparation for **10 Unlocks and 10 Locks**. Require
 zero duplicate commands, zero historical flood, and no global Active setting
 before calling the integration release-ready.
 
-## Deferred management sequence — do not run until RC6 smoke passes
+## Deferred management sequence — do not run until RC7 smoke passes
 
 ### A. Eight-step baseline
 

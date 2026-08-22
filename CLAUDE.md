@@ -135,7 +135,16 @@ Two details are load-bearing:
 - The decoded trailing address must equal the lock's MAC. A payload long enough to decode is not proof it is a TTLock payload, and that address is the only field whose value can be checked independently.
 - A decoded advertisement updates battery without rescheduling the authoritative coordinator poll. A changed hint requests a connected query; it never writes `locked` directly.
 
-An advertisement we cannot decode falls back to a coordinator refresh, but only while no state is known yet: that bootstrap is what makes the entity available seconds after HA boots instead of after a full `scan_interval`. Refreshing on *every* advertisement (the old behaviour) is what made the cooldown look necessary in the first place.
+The startup coordinator refresh treats Unknown state as an authoritative
+bootstrap. It first reuses a current aggregate/per-scanner candidate and, on a
+miss, permits one exact-address HA-managed Active wait while the adapter stays
+Auto. A successful `query_state()` publishes Locked/Unlocked; timeout remains
+Unknown. Explicit entity refreshes and changed hints may request the same
+active-capable query. Once state is known, routine interval polls and the
+background maintenance loop stay non-active. The per-lock connection mutex
+serializes concurrent refreshes, scans, and GATT attempts.
+
+An advertisement we cannot decode falls back to a coordinator refresh, but only while no state is known yet. Refreshing on *every* advertisement (the old behaviour) is what made the cooldown look necessary in the first place.
 
 The diagnostics dump carries the last advertisement per lock, raw bytes included, with `decoded: null` when the payload does not match the layout we know — that is what makes a "state never updates" report answerable without a round trip.
 

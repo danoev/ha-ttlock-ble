@@ -155,18 +155,29 @@ class TtlockBleConnection:
         async with self._lock:
             await self._async_disconnect_locked()
 
-    async def async_query_state(self) -> tuple[LockState | None, int | None] | None:
+    async def async_query_state(
+        self,
+        *,
+        active_scan: bool = False,
+    ) -> tuple[LockState | None, int | None] | None:
         """
         Return `(lock_state, battery)` through the live connection.
 
         Returns `None` when the lock is out of range or the query failed.
-        Every caller is already rate-limited — the coordinator by
-        `scan_interval`, the lock entity by the user pressing a button —
-        so the reconnect cooldown the maintain loop keeps is deliberately
-        not consulted here: it paces the background loop, not the reads.
+        ``active_scan`` opts an authoritative bootstrap or explicit refresh
+        into one bounded exact-address HA-managed Active window when no cached
+        connectable route exists. Routine known-state polls leave it false.
+        Every caller is already rate-limited, so the reconnect cooldown the
+        maintain loop keeps is deliberately not consulted here: it paces the
+        background loop, not reads.
         """
         async with self._lock:
-            client = await self._async_ensure_connected_locked(reason="state query")
+            client = await self._async_ensure_connected_locked(
+                active_scan=active_scan,
+                reason="authoritative state bootstrap"
+                if active_scan
+                else "state query",
+            )
             if client is None:
                 return None
             try:

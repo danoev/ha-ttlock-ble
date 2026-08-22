@@ -224,6 +224,88 @@ async def test_query_state_happy_path(
     mock_ttlock_client.add_event_listener.assert_called_once()
 
 
+async def test_unknown_state_query_reuses_immediate_connectable_device(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Startup does not scan when HA already has a connectable route."""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    assert await conn.async_query_state(active_scan=True) == (0, 80)
+
+    mock_ble_resolver.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+        connectable=True,
+    )
+    mock_active_scan.assert_not_awaited()
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.query_state.assert_awaited_once()
+
+
+async def test_unknown_state_query_uses_exact_address_active_acquisition(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """An active-capable state query uses HA Auto-mode acquisition once."""
+    mock_ble_resolver.side_effect = [None, mock_ble_device]
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        callback(MagicMock())
+
+    mock_active_scan.side_effect = _advertise
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    assert await conn.async_query_state(active_scan=True) == (0, 80)
+
+    mock_active_scan.assert_awaited_once()
+    scan_args = mock_active_scan.await_args.args
+    assert scan_args[0] is hass
+    assert scan_args[2]["address"] == sample_virtual_key.lockMac
+    assert scan_args[2]["connectable"] is True
+    assert scan_args[3].value == "active"
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.query_state.assert_awaited_once()
+
+
+async def test_concurrent_unknown_state_queries_share_active_acquisition(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """The per-lock mutex prevents duplicate startup scans and GATT attempts."""
+    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    scan_started = asyncio.Event()
+    release_scan = asyncio.Event()
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        scan_started.set()
+        await release_scan.wait()
+        callback(MagicMock())
+
+    mock_active_scan.side_effect = _advertise
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    first = asyncio.create_task(conn.async_query_state(active_scan=True))
+    second = asyncio.create_task(conn.async_query_state(active_scan=True))
+    await asyncio.wait_for(scan_started.wait(), timeout=1)
+    release_scan.set()
+
+    assert await asyncio.gather(first, second) == [(0, 80), (0, 80)]
+    mock_active_scan.assert_awaited_once()
+    mock_ttlock_client.connect.assert_awaited_once()
+    assert mock_ttlock_client.query_state.await_count == 2
+
+
 async def test_query_state_disconnects_on_ttlock_error(
     hass,
     sample_virtual_key,

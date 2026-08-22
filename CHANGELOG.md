@@ -3,7 +3,7 @@
 ## 3.5.1 hardware-validation development series
 
 This fork-only prerelease series preserves every published tag. **RC1 through
-RC5 are superseded for testing; use RC6.** They remain available solely as
+RC6 are superseded for testing; use RC7.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease
@@ -22,6 +22,10 @@ reproducible development artefacts and their tag history has not been rewritten.
   connected state query, makes advertisement/push state non-authoritative,
   attributes state transitions, seeds every historical log page silently, and
   uses an exact-address HA Auto-mode active window with a Passive tracker.
+- **RC7** uses that same bounded, exact-address HA Auto-mode acquisition for an
+  authoritative startup query while state is Unknown. Explicit entity refreshes
+  and changed advertisement hints can request the same path, while known-state
+  routine polling and background maintenance remain non-active.
 
 ## [3.5.0](https://github.com/roquerodrigo/ha-ttlock-ble/compare/v3.4.0...v3.5.0) (2026-08-07)
 

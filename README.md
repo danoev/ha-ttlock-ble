@@ -18,10 +18,11 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc6` is a hardware-validation prerelease, not a
+> Version `3.5.1rc7` is a hardware-validation prerelease, not a
 > production-certified release. It retains released `ttlock-ble==0.1.11` and
-> targets command-result, physical-state, operation-log seeding, and Auto-mode
-> Bluetooth correctness after RC5 proved 6/6 physical control. Follow the
+> adds an authoritative Unknown-state startup bootstrap under Home Assistant
+> Bluetooth Auto while retaining RC6's command-result, physical-state, and
+> operation-log corrections. Follow the
 > staged [real-lock checklist](docs/HARDWARE_VALIDATION.md). Passage mode and
 > further credential work remain excluded.
 
@@ -43,6 +44,9 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
   paths, then requests one 25-second Home Assistant active scan only if no such
   path exists. The first candidate goes through the SDK's normal retried GATT
   connection flow.
+- **Authoritative startup bootstrap** — while state is Unknown, the first
+  coordinator query may use the same bounded exact-address Home Assistant
+  Active window, without treating advertisement or push hints as bolt state.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities
@@ -138,11 +142,12 @@ data:
 
 The lock's TTLock firmware aggressively closes idle BLE sessions (~5 s of silence and it drops). The integration:
 
-1. Passively reads battery and a protocol state-change hint from advertisements. RC5 could not attribute its false Locked transitions between that bit and short push state, so neither overwrites authoritative connected state in RC6.
-2. Keeps a persistent BLE session via `connection.py`, reconnecting on every drop signalled by bleak, and waiting out the configured `reconnect_interval` before doing so — or none at all with `permanent_connection`.
-3. After a user-initiated `lock`/`unlock`, the SDK keeps the link alive for 25 s so push events (the lock's reports of keypad operations, auto-locks, etc.) reach Home Assistant in real time.
-4. Advertisement and short-heartbeat push state are hints. A change triggers a connected `SEARCH_BICYCLE_STATUS` query, and every applied transition logs its safe source, age, and route RSSI.
-5. If lock/unlock wrote its complete control frame but lost the acknowledgement, the command is never resent. One fresh state query may reconcile it to success; otherwise Home Assistant reports the outcome as unknown.
+1. Passively reads battery and a protocol state-change hint from advertisements. Neither overwrites authoritative connected state.
+2. On startup while state is Unknown, performs an authoritative query and may request one bounded exact-address HA-managed Active window if no live route is cached. Known-state routine polls remain non-active.
+3. Keeps a persistent BLE session via `connection.py`, reconnecting on every drop signalled by bleak, and waiting out the configured `reconnect_interval` before doing so — or none at all with `permanent_connection`.
+4. After a user-initiated `lock`/`unlock`, the SDK keeps the link alive for 25 s so push events (the lock's reports of keypad operations, auto-locks, etc.) reach Home Assistant in real time.
+5. Advertisement and short-heartbeat push state are hints. A change triggers a connected `SEARCH_BICYCLE_STATUS` query, and every applied transition logs its safe source, age, and route RSSI.
+6. If lock/unlock wrote its complete control frame but lost the acknowledgement, the command is never resent. One fresh state query may reconcile it to success; otherwise Home Assistant reports the outcome as unknown.
 
 ### Passive versus connectable Bluetooth
 
@@ -151,8 +156,9 @@ having a connectable `BLEDevice`. The passive packet is sufficient for battery
 and change detection, but authoritative state, lock/unlock, and local
 credential or auto-lock management need a connectable path.
 
-For those explicit operations only, the integration first checks Home
-Assistant's connectable-device cache. If the lock is absent, it starts one
+For explicit operations, Unknown-state startup bootstrap, or an explicit
+entity refresh, the integration first checks Home Assistant's
+connectable-device cache. If the lock is absent, it starts one
 bounded 25-second exact-address `async_process_advertisements()` wait in Active
 scanning mode. Home Assistant schedules that temporary window while the adapter
 remains configured as Auto; local adapters and ESPHome active Bluetooth Proxies
@@ -160,7 +166,8 @@ stay behind the same HA Bluetooth API. A matching callback is resolved again as
 connectable and then enters the existing SDK client path. Timeout retains the
 detailed Bluetooth reachability diagnosis. The persistent advertisement
 tracker is Passive, and coordinator polling plus the background reconnect loop
-never invoke this active-acquisition path.
+do not globally activate a scanner. Routine polling after an authoritative
+state is known and the background reconnect loop remain non-active.
 
 ## Useful commands
 

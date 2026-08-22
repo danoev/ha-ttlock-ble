@@ -73,6 +73,7 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         self._connections = connections
         self._state_attribution: dict[str, StateAttribution] = {}
         self._advertisement_hints: dict[str, LockState] = {}
+        self._active_scan_requested: set[str] = set()
 
     @property
     def connections(self) -> dict[str, TtlockBleConnection]:
@@ -125,7 +126,14 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
                 previous_hint.name,
                 advertisement.lock_state.name,
             )
+            self.async_request_active_state_refresh(mac)
             self.hass.async_create_task(self.async_request_refresh())
+
+    @callback
+    def async_request_active_state_refresh(self, mac: str) -> None:
+        """Mark one lock's next authoritative refresh as active-capable."""
+        if mac in self._connections:
+            self._active_scan_requested.add(mac)
 
     def state_attribution(self, mac: str) -> StateAttribution | None:
         """Return provenance for the latest authoritative state of ``mac``."""
@@ -158,8 +166,13 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
 
     async def _async_update_data(self) -> TtlockBleCoordinatorData:
         """Poll every connection once and return the aggregated state map."""
+        requested = set(self._active_scan_requested)
+        self._active_scan_requested.difference_update(requested)
         poll_tasks = {
-            mac: self._async_poll(connection)
+            mac: self._async_poll(
+                connection,
+                active_scan=mac in requested or not self.async_has_state(mac),
+            )
             for mac, connection in self._connections.items()
         }
         results = await asyncio.gather(*poll_tasks.values(), return_exceptions=True)
@@ -182,9 +195,11 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
     async def _async_poll(
         self,
         connection: TtlockBleConnection,
+        *,
+        active_scan: bool,
     ) -> TtlockBleLockState:
         """Query one lock through its persistent connection."""
-        result = await connection.async_query_state()
+        result = await connection.async_query_state(active_scan=active_scan)
         if result is None:
             return {"locked": None, "battery_level": None}
         raw_state, battery = result

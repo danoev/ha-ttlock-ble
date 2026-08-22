@@ -27,7 +27,7 @@ copied into either MIT project.
   [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
   `codex/hardware-validation-0`, created from `codex/management-actions` for
-  the `3.5.1rc6` prerelease candidate. The original repository remains
+  the `3.5.1rc7` prerelease candidate. The original repository remains
   the `upstream` fetch-only remote and
   [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
   `origin`.
@@ -75,6 +75,10 @@ copied into either MIT project.
 - RC6 changes the persistent exact-address tracker to Passive and uses HA's
   exact-address `async_process_advertisements` Active wait for explicit misses,
   allowing the adapter to remain in Auto and preserving proxy routing.
+- RC7 uses the same HA-native bounded acquisition for the first authoritative
+  query while coordinator state is Unknown. Successful query state is
+  published; a timeout remains Unknown. Known-state routine polling and the
+  background maintenance loop remain non-active.
 
 The Home Assistant integration intentionally continues to depend on the
 released `ttlock-ble==0.1.11`. Its passcode and auto-lock actions therefore
@@ -96,8 +100,8 @@ Current local branches:
 
 - `ttlock-ble`: 303 tests passed, 97.31% coverage; Ruff and configured strict
   mypy pass.
-- `ha-ttlock-ble`: 320 tests passed, 97%+ coverage; Ruff and configured mypy
-  pass locally. Hosted RC6 checks are pending publication.
+- `ha-ttlock-ble`: 328 tests passed with 98.05% coverage; Ruff and configured
+  mypy pass locally. Hosted RC7 checks are pending publication.
 - `manifest.json`, `hacs.json`, translation JSON, and `services.yaml` parse;
   the manifest and project versions agree.
 
@@ -118,7 +122,7 @@ version it has selected for download. Fork prerelease tags use `@danoev`, but
 the fork's default `main` still points at the upstream stable source containing
 `@roquerodrigo`. With prerelease display disabled—or before a forced repository
 refresh clears cached metadata—HACS therefore continues to show the stable
-default-branch author. The RC6 source metadata itself is correct; this is a
+default-branch author. The RC7 source metadata itself is correct; this is a
 version-selection/cache effect and is non-blocking for Bluetooth validation.
 
 A local Home Assistant `check_config` run is not a faithful gate in this
@@ -154,13 +158,20 @@ Recommendation: make an on-demand-only mode the preferred low-battery design
 for users who accept losing between-command real-time push events, while
 retaining periodic/persistent listening as an explicit opt-in. The existing
 `permanent_connection` option should remain explicit because reconnecting
-immediately after every idle drop is the highest-drain mode. RC6 deliberately
+immediately after every idle drop is the highest-drain mode. RC7 deliberately
 does not change the maintenance loop or its defaults; that architecture change
 needs separate UX, migration, event-loss and hardware-battery validation.
 
+A successful background maintenance connection authenticates a client but does
+not itself call `query_state()` or publish coordinator state. Candidate misses
+back off through the connection loop's bounded retry cadence and can therefore
+be quiet in the UI. A long observed gap between successful connections is not
+evidence of a configured one-hour reconnect interval; RC7 leaves this separate
+battery/event-delivery design question unchanged.
+
 Advertisement-history clearing was reviewed but is not used. Home Assistant
 documents it for forcing an otherwise identical advertisement to be processed
-as new. RC6 instead reads existing HA aggregate and per-scanner representations;
+as new. RC7 instead reads existing HA aggregate and per-scanner representations;
 the current HA implementation also removes connectable history, so clearing it
 could discard useful state and affect other Bluetooth consumers of that
 address.
@@ -169,9 +180,10 @@ address.
 
 The protocol 5.3 / scene 2 lock at `B6:D4:1E:DB:15:F8` has proved passive
 battery, authenticated GATT, and 6/6 physical cold-idle lock/unlock through Home
-Assistant under RC5. RC6 must now pass the documented Auto-mode 3 Unlock + 3
-Lock smoke test without false failures, state reversal, duplicate commands, or
-historical-log flood, then 10 + 10 before release readiness.
+Assistant under RC5. RC7 must first prove authoritative startup bootstrap under
+Auto, then retain RC6's 3 Unlock + 3 Lock command-result/state smoke test
+without false failures, state reversal, duplicate commands, or historical-log
+flood. The 10 + 10 gate remains required for release readiness.
 
 ## Unsupported or intentionally deferred features
 
@@ -204,8 +216,9 @@ historical-log flood, then 10 + 10 before release readiness.
 
 ## Next milestone
 
-1. Install the `3.5.1rc6` GitHub prerelease as a HACS custom-repository version
-   and run the exact Auto-mode cold-idle 3 unlock + 3 lock smoke test with no
-   phone/keypad interaction. Expand to 10 + 10 only after it passes.
+1. Install the `3.5.1rc7` GitHub prerelease as a HACS custom-repository version
+   and run the Auto-mode Unknown-state startup bootstrap in the updated
+   runbook, followed by the cold-idle 3 unlock + 3 lock smoke test with no
+   phone/keypad interaction. Expand to 10 + 10 only after both pass.
 2. Do not resume PIN, passage, card, fingerprint, or other feature development
    until that run passes and its sanitized timing/route evidence is reviewed.
