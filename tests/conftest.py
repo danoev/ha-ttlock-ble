@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import monotonic
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -125,7 +126,7 @@ def mock_ble_device() -> MagicMock:
 def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
     """Patch HA's connectable-device and service-info cache lookups."""
     resolver = MagicMock(return_value=mock_ble_device)
-    service_info = MagicMock(source="hci0", rssi=-70)
+    service_info = MagicMock(source="hci0", rssi=-70, time=monotonic())
     with (
         patch(
             "custom_components.ttlock_ble.connection.async_ble_device_from_address",

@@ -1,16 +1,18 @@
 # Real-lock hardware-validation runbook
 
-This runbook is for the `3.5.1rc7` prerelease only. It is a hardware
+This runbook is for the `3.5.1rc8` prerelease only. It is a hardware
 validation build, not production-certified. It deliberately uses released
 `ttlock-ble==0.1.11`; passage mode is excluded from the build and stays
 isolated on the SDK development branch.
 
-RC5 already proved 6/6 physical cold-idle control. RC7 must first prove that
-startup can bootstrap Unknown to an authoritative physical state with the Home
-Assistant scanner set to **Auto**, then retain RC6's truthful command results,
-physically correct persistent state, silent history seeding, and acquisition.
+RC5 already proved 6/6 physical cold-idle control, and RC7 proved that several
+cold-idle operations can succeed under Auto before stale connectable history
+can trap a later command on a dead route. RC8 must prove that a failed cached
+pre-command route triggers one fresh Home Assistant-managed acquisition, then
+retain RC7's authoritative startup bootstrap and RC6's truthful command
+results, physically correct persistent state, and silent history seeding.
 Do not run PIN, auto-lock, passage, card, fingerprint, or other management
-mutations during the first RC7 session.
+mutations during the first RC8 session.
 
 Use disposable PINs that have never protected the door. Keep a mechanical key
 or another verified recovery route available. Do not run `clear_passcodes`,
@@ -65,7 +67,7 @@ sequence:
     response_variable: auto_lock_result
 ```
 
-## RC7 authoritative startup bootstrap
+## RC8 authoritative startup and stale-route acquisition
 
 1. Keep the Home Assistant Bluetooth adapter set to **Auto**. Close TTLock,
    LightBlue, and other phone BLE tools. Do not use a global Active setting.
@@ -89,12 +91,22 @@ sequence:
    attempt, or credential-bearing log line. Restore range before continuing.
 8. After state is known, observe one ordinary scheduled poll. It must not ask
    HA for an Active window solely because the routine interval elapsed.
+9. Exercise the RC8 regression explicitly: allow a previously connectable HA
+   route for this address to become several minutes old without clearing HA's
+   Bluetooth history, then invoke one lock or unlock action. Require the cached
+   route's pre-command GATT attempt to fail, exactly one address-scoped Active
+   acquisition to accept a newer callback route, and the requested command to
+   be sent once through that fresh route.
+10. If HA replays the old service-info record immediately after callback
+    registration, require the integration to ignore it by receipt timestamp.
+    Record the old and accepted route/source, advertisement age, scan count,
+    GATT attempt count, control-write count, elapsed time, and physical result.
 
 Stop if startup remains Unknown while a valid route was acquired, a hint writes
 state directly, more than one concurrent scan/GATT attempt occurs, the scanner
 must be switched globally Active, or a timeout invents physical state.
 
-## RC7 command-result and state smoke test
+## RC8 command-result and state smoke test
 
 Use the direct USB adapter and present installation first. The target lock is
 `B6:D4:1E:DB:15:F8`, protocol 5.3, scene 2. Do not improve radio placement
@@ -106,7 +118,7 @@ until this baseline is recorded.
    handle, or lock body during acquisition.
 2. Disable native auto-lock and physically verify it remains disabled. Keep the
    door closed and the current short USB extension/radio position unchanged.
-3. Restart Home Assistant with the safe loggers above and pass the RC7 startup
+3. Restart Home Assistant with the safe loggers above and pass the RC8 startup
    bootstrap above. Allow initial operation log synchronisation to finish. It
    must create **zero** historical HA events.
    Confirm passive battery advertisements arrive, then leave the lock untouched
@@ -150,10 +162,13 @@ Use one row per command:
 |---|---|---:|---|---|---|---:|---|
 | 1 | unlock |  |  |  |  |  |  |
 
-RC7 first checks HA's aggregate and per-connectable-scanner records. Only when
-both are empty does exact-address `async_process_advertisements()` register a
-connectable callback and ask HA to schedule one bounded Active window. This is
-compatible with the adapter remaining in Auto and with ESPHome active proxies.
+RC8 first checks HA's aggregate and per-connectable-scanner records. When both
+are empty, or the selected cached route exhausts its pre-command connection
+attempt, exact-address `async_process_advertisements()` registers a connectable
+callback and asks HA to schedule one bounded Active window. Replayed history
+from before that window is ignored, and the fresh callback's own HA route is
+used directly. This is compatible with the adapter remaining in Auto and with
+ESPHome active proxies. Background maintenance remains non-active.
 
 Stop on the first unintended/duplicate physical operation, unreconciled false
 failure, state mismatch, historical event flood, requirement for global Active,
@@ -168,7 +183,7 @@ three-minute disconnected preparation for **10 Unlocks and 10 Locks**. Require
 zero duplicate commands, zero historical flood, and no global Active setting
 before calling the integration release-ready.
 
-## Deferred management sequence — do not run until RC7 smoke passes
+## Deferred management sequence — do not run until RC8 smoke passes
 
 ### A. Eight-step baseline
 

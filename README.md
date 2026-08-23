@@ -18,11 +18,11 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc7` is a hardware-validation prerelease, not a
+> Version `3.5.1rc8` is a hardware-validation prerelease, not a
 > production-certified release. It retains released `ttlock-ble==0.1.11` and
-> adds an authoritative Unknown-state startup bootstrap under Home Assistant
-> Bluetooth Auto while retaining RC6's command-result, physical-state, and
-> operation-log corrections. Follow the
+> adds a one-shot fresh-route fallback when HA's cached connectable history
+> proves unreachable, while retaining RC7's authoritative startup bootstrap
+> and RC6's command/state/log corrections. Follow the
 > staged [real-lock checklist](docs/HARDWARE_VALIDATION.md). Passage mode and
 > further credential work remain excluded.
 
@@ -47,6 +47,9 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
 - **Authoritative startup bootstrap** — while state is Unknown, the first
   coordinator query may use the same bounded exact-address Home Assistant
   Active window, without treating advertisement or push hints as bolt state.
+- **Stale-route recovery** — an active-capable operation whose cached HA route
+  exhausts its pre-command GATT attempt requests exactly one fresh exact-address
+  Active acquisition. A control command is still issued at most once.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities
@@ -143,7 +146,7 @@ data:
 The lock's TTLock firmware aggressively closes idle BLE sessions (~5 s of silence and it drops). The integration:
 
 1. Passively reads battery and a protocol state-change hint from advertisements. Neither overwrites authoritative connected state.
-2. On startup while state is Unknown, performs an authoritative query and may request one bounded exact-address HA-managed Active window if no live route is cached. Known-state routine polls remain non-active.
+2. On startup while state is Unknown, performs an authoritative query and may request one bounded exact-address HA-managed Active window if no route is cached or a cached route proves unreachable before the query. Known-state routine polls remain non-active.
 3. Keeps a persistent BLE session via `connection.py`, reconnecting on every drop signalled by bleak, and waiting out the configured `reconnect_interval` before doing so — or none at all with `permanent_connection`.
 4. After a user-initiated `lock`/`unlock`, the SDK keeps the link alive for 25 s so push events (the lock's reports of keypad operations, auto-locks, etc.) reach Home Assistant in real time.
 5. Advertisement and short-heartbeat push state are hints. A change triggers a connected `SEARCH_BICYCLE_STATUS` query, and every applied transition logs its safe source, age, and route RSSI.
@@ -158,12 +161,16 @@ credential or auto-lock management need a connectable path.
 
 For explicit operations, Unknown-state startup bootstrap, or an explicit
 entity refresh, the integration first checks Home Assistant's
-connectable-device cache. If the lock is absent, it starts one
+connectable-device cache. If the lock is absent, or that route's full
+pre-command connection attempt fails, it starts one
 bounded 25-second exact-address `async_process_advertisements()` wait in Active
 scanning mode. Home Assistant schedules that temporary window while the adapter
 remains configured as Auto; local adapters and ESPHome active Bluetooth Proxies
 stay behind the same HA Bluetooth API. A matching callback is resolved again as
-connectable and then enters the existing SDK client path. Timeout retains the
+connectable only when its receipt timestamp proves it arrived during the new
+window; that callback's HA route then enters the existing SDK client path.
+The fallback is bounded to one Active acquisition and cannot resend a control
+frame because it completes before authentication or command dispatch. Timeout retains the
 detailed Bluetooth reachability diagnosis. The persistent advertisement
 tracker is Passive, and coordinator polling plus the background reconnect loop
 do not globally activate a scanner. Routine polling after an authoritative

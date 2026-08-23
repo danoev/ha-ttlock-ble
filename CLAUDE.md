@@ -136,13 +136,18 @@ Two details are load-bearing:
 - A decoded advertisement updates battery without rescheduling the authoritative coordinator poll. A changed hint requests a connected query; it never writes `locked` directly.
 
 The startup coordinator refresh treats Unknown state as an authoritative
-bootstrap. It first reuses a current aggregate/per-scanner candidate and, on a
-miss, permits one exact-address HA-managed Active wait while the adapter stays
-Auto. A successful `query_state()` publishes Locked/Unlocked; timeout remains
-Unknown. Explicit entity refreshes and changed hints may request the same
-active-capable query. Once state is known, routine interval polls and the
-background maintenance loop stay non-active. The per-lock connection mutex
-serializes concurrent refreshes, scans, and GATT attempts.
+bootstrap. It first reuses an aggregate/per-scanner candidate and, on a miss or
+after that candidate exhausts its pre-command GATT attempt, permits one
+exact-address HA-managed Active wait while the adapter stays Auto. A callback
+record must have a service-info timestamp newer than that wait's registration;
+this rejects HA's immediate cached-history replay and uses the callback's own
+local/proxy `BLEDevice` as the fresh route. A successful `query_state()`
+publishes Locked/Unlocked; timeout remains Unknown. Explicit entity refreshes
+and changed hints may request the same active-capable query. Once state is
+known, routine interval polls and the background maintenance loop stay
+non-active. The per-lock connection mutex serializes concurrent refreshes,
+scans, and GATT attempts. This recovery remains before authentication and
+command dispatch, so it cannot resend a control frame.
 
 An advertisement we cannot decode falls back to a coordinator refresh, but only while no state is known yet. Refreshing on *every* advertisement (the old behaviour) is what made the cooldown look necessary in the first place.
 

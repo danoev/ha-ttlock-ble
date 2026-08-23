@@ -6,7 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.components.bluetooth import BluetoothReachabilityIntent
+from homeassistant.components.bluetooth import (
+    MONOTONIC_TIME,
+    BluetoothReachabilityIntent,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from ttlock_ble import KeyboardPwdType, LockEvent, LockState, TTLockClient, TTLockError
 
@@ -36,6 +39,21 @@ def _scanner_device(
         scanner=SimpleNamespace(source=source),
         ble_device=device,
         advertisement=SimpleNamespace(rssi=rssi),
+    )
+
+
+def _fresh_service_info(
+    device: object,
+    *,
+    source: str = "hci0",
+    rssi: int = -70,
+) -> SimpleNamespace:
+    """Build a connectable HA callback received after acquisition started."""
+    return SimpleNamespace(
+        device=device,
+        source=source,
+        rssi=rssi,
+        time=MONOTONIC_TIME() + 0.001,
     )
 
 
@@ -255,10 +273,10 @@ async def test_unknown_state_query_uses_exact_address_active_acquisition(
     mock_active_scan,
 ) -> None:
     """An active-capable state query uses HA Auto-mode acquisition once."""
-    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    mock_ble_resolver.return_value = None
 
     async def _advertise(_hass, callback, *_args) -> None:
-        callback(MagicMock())
+        callback(_fresh_service_info(mock_ble_device))
 
     mock_active_scan.side_effect = _advertise
     conn = TtlockBleConnection(hass, sample_virtual_key)
@@ -284,14 +302,14 @@ async def test_concurrent_unknown_state_queries_share_active_acquisition(
     mock_active_scan,
 ) -> None:
     """The per-lock mutex prevents duplicate startup scans and GATT attempts."""
-    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    mock_ble_resolver.return_value = None
     scan_started = asyncio.Event()
     release_scan = asyncio.Event()
 
     async def _advertise(_hass, callback, *_args) -> None:
         scan_started.set()
         await release_scan.wait()
-        callback(MagicMock())
+        callback(_fresh_service_info(mock_ble_device))
 
     mock_active_scan.side_effect = _advertise
     conn = TtlockBleConnection(hass, sample_virtual_key)
@@ -345,6 +363,111 @@ async def test_lock_happy(
     mock_active_scan.assert_not_awaited()
 
 
+async def test_stale_cached_route_falls_back_to_one_fresh_active_candidate(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A pre-command stale-route failure reacquires once and sends once."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    fresh_device = MagicMock(name="FreshBLEDevice")
+    fresh_device.address = sample_virtual_key.lockMac
+    stale_info = SimpleNamespace(
+        device=mock_ble_device,
+        source="hci0",
+        rssi=-90,
+        time=MONOTONIC_TIME() - 180,
+    )
+    fresh_info = _fresh_service_info(
+        fresh_device,
+        source="esp32-proxy-hall",
+        rssi=-82,
+    )
+    fresh_client = MagicMock(name="FreshTTLockClient", is_connected=True)
+    fresh_client.connect = AsyncMock(return_value=None)
+    fresh_client.disconnect = AsyncMock(return_value=None)
+    fresh_client.lock = AsyncMock(return_value=None)
+    fresh_client.add_event_listener = MagicMock()
+    mock_ttlock_client.connect.side_effect = TTLockError("device not found")
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        mock_ttlock_client,
+        fresh_client,
+    ]
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        assert callback(stale_info) is False
+        assert callback(fresh_info) is True
+
+    mock_active_scan.side_effect = _advertise
+    with patch(
+        "custom_components.ttlock_ble.connection.async_last_service_info",
+        return_value=stale_info,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        await conn.async_lock()
+
+    mock_active_scan.assert_awaited_once()
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
+    assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args_list[0].args[0]
+        is mock_ble_device
+    )
+    assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args_list[1].args[0]
+        is fresh_device
+    )
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    fresh_client.connect.assert_awaited_once()
+    fresh_client.lock.assert_awaited_once()
+
+
+async def test_failed_fresh_candidate_does_not_repeat_active_acquisition(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A stale route and its fresh replacement cannot create a retry loop."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    fresh_device = MagicMock(name="FreshBLEDevice")
+    fresh_device.address = sample_virtual_key.lockMac
+    fresh_client = MagicMock(name="FreshTTLockClient", is_connected=False)
+    fresh_client.connect = AsyncMock(side_effect=TTLockError("still unreachable"))
+    fresh_client.disconnect = AsyncMock(return_value=None)
+    fresh_client.lock = AsyncMock(return_value=None)
+    fresh_client.unlock = AsyncMock(return_value=None)
+    mock_ttlock_client.connect.side_effect = TTLockError("stale route")
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        mock_ttlock_client,
+        fresh_client,
+    ]
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        assert callback(_fresh_service_info(fresh_device)) is True
+
+    mock_active_scan.side_effect = _advertise
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    with pytest.raises(TTLockError, match="not reachable"):
+        await conn.async_unlock()
+
+    mock_active_scan.assert_awaited_once()
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
+    mock_ttlock_client.connect.assert_awaited_once()
+    fresh_client.connect.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_not_awaited()
+    fresh_client.unlock.assert_not_awaited()
+
+
 @pytest.mark.parametrize("source", ["hci0", "esp32-proxy-kitchen"])
 async def test_cold_idle_uses_connectable_scanner_path_without_aggregate_history(
     hass,
@@ -392,27 +515,32 @@ async def test_active_scan_accepts_delayed_connectable_scanner_path(
 ) -> None:
     """An exact-address callback resolves a proxy-specific connectable path."""
     mock_ble_resolver.return_value = None
-    scanner_path = _scanner_device(
-        mock_ble_device,
-        source="esp32-proxy-hall",
-        rssi=-78,
-    )
     scan_started = asyncio.Event()
 
     async def _advertise_after_start(_hass, callback, *_args) -> None:
         scan_started.set()
-        callback(MagicMock())
+        callback(
+            _fresh_service_info(
+                mock_ble_device,
+                source="esp32-proxy-hall",
+                rssi=-78,
+            )
+        )
 
     mock_active_scan.side_effect = _advertise_after_start
     with patch(
         "custom_components.ttlock_ble.connection.async_scanner_devices_by_address",
-        side_effect=[[], [scanner_path]],
+        return_value=[],
     ) as scanner_resolver:
         conn = TtlockBleConnection(hass, sample_virtual_key)
         await conn.async_lock()
 
     assert scan_started.is_set()
-    assert scanner_resolver.call_count == 2
+    scanner_resolver.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+        connectable=True,
+    )
     scan_args = mock_active_scan.await_args.args
     assert scan_args[0] is hass
     assert scan_args[2]["address"] == sample_virtual_key.lockMac
@@ -462,7 +590,7 @@ async def test_sdk_connection_boundary_allows_transient_retry_success(
     assert sdk_client.is_connected
 
 
-async def test_explicit_command_active_scans_then_resolves_connectable_device(
+async def test_explicit_command_active_scan_uses_fresh_callback_device(
     hass,
     sample_virtual_key,
     mock_ble_device,
@@ -470,13 +598,13 @@ async def test_explicit_command_active_scans_then_resolves_connectable_device(
     mock_ttlock_client,
     mock_active_scan,
 ) -> None:
-    """A later cache entry continues without waiting for a new callback."""
-    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    """A fresh HA callback supplies the route without rereading stale history."""
+    mock_ble_resolver.return_value = None
     scan_started = asyncio.Event()
 
     async def _advertise_after_start(_hass, callback, *_args) -> None:
         scan_started.set()
-        callback(MagicMock())
+        callback(_fresh_service_info(mock_ble_device))
 
     mock_active_scan.side_effect = _advertise_after_start
 
@@ -484,10 +612,11 @@ async def test_explicit_command_active_scans_then_resolves_connectable_device(
     await conn.async_lock()
 
     assert scan_started.is_set()
-    assert mock_ble_resolver.call_count == 2
-    for call in mock_ble_resolver.call_args_list:
-        assert call.args == (hass, sample_virtual_key.lockMac)
-        assert call.kwargs == {"connectable": True}
+    mock_ble_resolver.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+        connectable=True,
+    )
     scan_args = mock_active_scan.await_args.args
     assert scan_args[0] is hass
     assert scan_args[2]["address"] == sample_virtual_key.lockMac
@@ -642,14 +771,14 @@ async def test_simultaneous_commands_share_one_active_scan(
     mock_ttlock_client,
 ) -> None:
     """The per-lock operation mutex prevents duplicate simultaneous scans."""
-    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    mock_ble_resolver.return_value = None
     scan_started = asyncio.Event()
     release_scan = asyncio.Event()
 
     async def _run_active_scan(_hass, callback, *_args) -> None:
         scan_started.set()
         await release_scan.wait()
-        callback(MagicMock())
+        callback(_fresh_service_info(mock_ble_device))
 
     active_scan = AsyncMock(side_effect=_run_active_scan)
     with (
@@ -709,6 +838,90 @@ async def test_explicit_command_reuses_background_connection_in_progress(
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.unlock.assert_awaited_once()
     mock_active_scan.assert_not_awaited()
+
+
+async def test_background_connect_failure_remains_non_active(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Background maintenance never escalates a failed cached route to Active."""
+    mock_ttlock_client.connect.side_effect = TTLockError("stale background route")
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    async with conn._lock:
+        result = await conn._async_ensure_connected_locked(
+            reason="background maintenance",
+        )
+
+    assert result is None
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_active_scan.assert_not_awaited()
+
+
+async def test_explicit_command_runs_after_failed_background_attempt(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Queued user work gets the mutex next and may actively reacquire."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    background_started = asyncio.Event()
+    release_background = asyncio.Event()
+    background_error = TTLockError("stale background route")
+
+    async def _background_connect() -> None:
+        background_started.set()
+        await release_background.wait()
+        raise background_error
+
+    background_client = mock_ttlock_client
+    background_client.connect.side_effect = _background_connect
+    explicit_stale_client = MagicMock(name="ExplicitStaleClient", is_connected=False)
+    explicit_stale_client.connect = AsyncMock(side_effect=TTLockError("stale route"))
+    explicit_stale_client.disconnect = AsyncMock(return_value=None)
+    fresh_client = MagicMock(name="FreshExplicitClient", is_connected=True)
+    fresh_client.connect = AsyncMock(return_value=None)
+    fresh_client.disconnect = AsyncMock(return_value=None)
+    fresh_client.unlock = AsyncMock(return_value=None)
+    fresh_client.add_event_listener = MagicMock()
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        background_client,
+        explicit_stale_client,
+        fresh_client,
+    ]
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        assert callback(_fresh_service_info(mock_ble_device)) is True
+
+    mock_active_scan.side_effect = _advertise
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    async def _background_acquire():
+        async with conn._lock:
+            return await conn._async_ensure_connected_locked(
+                reason="background maintenance",
+            )
+
+    background = asyncio.create_task(_background_acquire())
+    await asyncio.wait_for(background_started.wait(), timeout=1)
+    explicit = asyncio.create_task(conn.async_unlock())
+    await asyncio.sleep(0)
+    explicit_stale_client.connect.assert_not_awaited()
+
+    release_background.set()
+    assert await background is None
+    await explicit
+
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 3
+    mock_active_scan.assert_awaited_once()
+    fresh_client.unlock.assert_awaited_once()
 
 
 async def test_cancelling_during_gatt_connect_disconnects_partial_client(
@@ -801,10 +1014,10 @@ async def test_auto_lock_management_active_scans_when_initially_missing(
     mock_active_scan,
 ) -> None:
     """Auto-lock actions opt into the same one-shot connectable scan."""
-    mock_ble_resolver.side_effect = [None, mock_ble_device]
+    mock_ble_resolver.return_value = None
 
     async def _advertise(_hass, callback, *_args) -> None:
-        callback(MagicMock())
+        callback(_fresh_service_info(mock_ble_device))
 
     mock_active_scan.side_effect = _advertise
 
@@ -914,6 +1127,7 @@ async def test_ambiguous_unlock_is_reconciled_without_command_resend(
     sample_virtual_key,
     mock_ble_resolver,
     mock_ttlock_client,
+    mock_active_scan,
 ) -> None:
     """Fresh matching state converts a lost acknowledgement to success."""
     mock_ttlock_client.unlock = AsyncMock(
@@ -932,6 +1146,7 @@ async def test_ambiguous_unlock_is_reconciled_without_command_resend(
     mock_ttlock_client.unlock.assert_awaited_once()
     mock_ttlock_client.query_state.assert_awaited_once()
     mock_ttlock_client.disconnect.assert_not_awaited()
+    mock_active_scan.assert_not_awaited()
 
 
 async def test_ambiguous_control_with_contradictory_state_stays_unknown(

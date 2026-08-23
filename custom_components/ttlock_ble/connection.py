@@ -21,6 +21,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from homeassistant.components.bluetooth import (
+    MONOTONIC_TIME,
     BluetoothCallbackMatcher,
     BluetoothReachabilityIntent,
     BluetoothScanningMode,
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 
     from bleak import BleakClient
     from bleak.backends.device import BLEDevice
+    from home_assistant_bluetooth import BluetoothServiceInfoBleak
     from homeassistant.core import HomeAssistant
 
     from ttlock_ble import LockEvent, LogEntry, VirtualKey
@@ -68,6 +70,7 @@ class _ConnectionCandidate:
     resolution: str
     source: str
     rssi: int | None
+    advertisement_time: float | None
 
 
 def event_signal(mac: str) -> str:
@@ -533,94 +536,126 @@ class TtlockBleConnection:
             reason=reason,
             log_miss=True,
         )
+        active_acquisition_attempted = False
         if candidate is None and active_scan:
+            active_acquisition_attempted = True
             candidate = await self._async_wait_for_connectable_device_locked(
                 reason=reason,
             )
-        if candidate is None and not self._closing_event.is_set():
+        while candidate is not None and not self._closing_event.is_set():
+            client = TtlockBleClient.from_ble_device(
+                candidate.device,
+                self._key,
+                disconnected_callback=self._on_disconnected,
+            )
+            connect_started = monotonic()
+            age = (
+                max(0.0, MONOTONIC_TIME() - candidate.advertisement_time)
+                if candidate.advertisement_time is not None
+                else None
+            )
+            LOGGER.debug(
+                "Opening BLE connection for %s "
+                "(reason=%s, resolution=%s, source=%s, RSSI=%s, age=%s, "
+                "candidate_elapsed=%.1fs; GATT retries delegated to ttlock-ble)",
+                self._key.lockMac,
+                reason,
+                candidate.resolution,
+                candidate.source,
+                candidate.rssi if candidate.rssi is not None else "unknown",
+                f"{age:.1f}s" if age is not None else "unknown",
+                connect_started - started,
+            )
             try:
-                diagnostic = async_address_reachability_diagnostics(
-                    self._hass,
-                    self._key.lockMac,
-                    BluetoothReachabilityIntent.CONNECTION,
-                )
-            except Exception:  # noqa: BLE001 -- diagnostics must not mask failure
+                await client.connect()
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
+                raise
+            except TTLockError as exc:
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
                 LOGGER.debug(
-                    "Could not build Bluetooth reachability diagnostics for %s",
-                    self._key.lockMac,
-                    exc_info=True,
-                )
-            else:
-                self._reachability_diagnostic = diagnostic
-                LOGGER.debug(
-                    "Lock %s is not reachable via Bluetooth "
-                    "(reason=%s, elapsed=%.1fs): %s",
+                    "BLE connect failed for %s "
+                    "(reason=%s, resolution=%s, source=%s, age=%s, "
+                    "connect_elapsed=%.1fs, total_elapsed=%.1fs): %s",
                     self._key.lockMac,
                     reason,
+                    candidate.resolution,
+                    candidate.source,
+                    f"{age:.1f}s" if age is not None else "unknown",
+                    monotonic() - connect_started,
                     monotonic() - started,
-                    diagnostic,
+                    exc,
                 )
-        if candidate is None or self._closing_event.is_set():
-            return None
-        client = TtlockBleClient.from_ble_device(
-            candidate.device,
-            self._key,
-            disconnected_callback=self._on_disconnected,
-        )
-        connect_started = monotonic()
-        LOGGER.debug(
-            "Opening BLE connection for %s "
-            "(reason=%s, resolution=%s, source=%s, RSSI=%s, "
-            "candidate_elapsed=%.1fs; GATT retries delegated to ttlock-ble)",
-            self._key.lockMac,
-            reason,
-            candidate.resolution,
-            candidate.source,
-            candidate.rssi if candidate.rssi is not None else "unknown",
-            connect_started - started,
-        )
-        try:
-            await client.connect()
-        except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
-                await client.disconnect()
-            raise
-        except TTLockError as exc:
-            with contextlib.suppress(Exception):
-                await client.disconnect()
+                if not active_scan or active_acquisition_attempted:
+                    candidate = None
+                    break
+                active_acquisition_attempted = True
+                LOGGER.debug(
+                    "Cached BLE route failed before command/authentication for %s; "
+                    "starting one fresh address-scoped acquisition (reason=%s)",
+                    self._key.lockMac,
+                    reason,
+                )
+                candidate = await self._async_wait_for_connectable_device_locked(
+                    reason=reason,
+                )
+                continue
+            if self._closing_event.is_set():
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
+                LOGGER.debug(
+                    "Discarded late BLE connection for %s (reason=%s, failure=closing)",
+                    self._key.lockMac,
+                    reason,
+                )
+                return None
             LOGGER.debug(
-                "BLE connect failed for %s "
-                "(reason=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs): %s",
+                "BLE connection established for %s "
+                "(reason=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs)",
                 self._key.lockMac,
                 reason,
                 monotonic() - connect_started,
                 monotonic() - started,
-                exc,
             )
-            return None
-        if self._closing_event.is_set():
-            with contextlib.suppress(Exception):
-                await client.disconnect()
-            LOGGER.debug(
-                "Discarded late BLE connection for %s (reason=%s, failure=closing)",
+            client.add_event_listener(self._on_event)
+            self._client = client
+            self._last_connection_rssi = candidate.rssi
+            self._disconnected.clear()
+            self._broadcast_connection_state(connected=True)
+            return client
+        if not self._closing_event.is_set():
+            self._record_reachability_diagnostic(reason, started)
+        return None
+
+    def _record_reachability_diagnostic(
+        self,
+        reason: str,
+        started: float,
+    ) -> None:
+        """Record HA's credential-safe explanation for a final route failure."""
+        try:
+            diagnostic = async_address_reachability_diagnostics(
+                self._hass,
                 self._key.lockMac,
-                reason,
+                BluetoothReachabilityIntent.CONNECTION,
             )
-            return None
+        except Exception:  # noqa: BLE001 -- diagnostics must not mask failure
+            LOGGER.debug(
+                "Could not build Bluetooth reachability diagnostics for %s",
+                self._key.lockMac,
+                exc_info=True,
+            )
+            return
+        self._reachability_diagnostic = diagnostic
         LOGGER.debug(
-            "BLE connection established for %s "
-            "(reason=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs)",
+            "Lock %s is not reachable via Bluetooth (reason=%s, elapsed=%.1fs): %s",
             self._key.lockMac,
             reason,
-            monotonic() - connect_started,
             monotonic() - started,
+            diagnostic,
         )
-        client.add_event_listener(self._on_event)
-        self._client = client
-        self._last_connection_rssi = candidate.rssi
-        self._disconnected.clear()
-        self._broadcast_connection_state(connected=True)
-        return client
 
     def _resolve_connection_candidate(
         self,
@@ -652,6 +687,9 @@ class TtlockBleConnection:
                 resolution="aggregate connectable history",
                 source=service_info.source if service_info is not None else "unknown",
                 rssi=service_info.rssi if service_info is not None else None,
+                advertisement_time=service_info.time
+                if service_info is not None
+                else None,
             )
             LOGGER.debug(
                 "Connection candidate resolved for %s "
@@ -685,6 +723,7 @@ class TtlockBleConnection:
                 resolution="connectable scanner path",
                 source=scanner_device.scanner.source,
                 rssi=scanner_device.advertisement.rssi,
+                advertisement_time=None,
             )
             LOGGER.debug(
                 "Connection candidate resolved for %s "
@@ -721,6 +760,7 @@ class TtlockBleConnection:
         """Wait for this address through HA's Auto-mode active-scan scheduler."""
         address = self._key.lockMac
         started = monotonic()
+        fresh_after = MONOTONIC_TIME()
         LOGGER.debug(
             "Starting address-scoped active acquisition for %s "
             "(reason=%s, timeout=%ds)",
@@ -730,13 +770,23 @@ class TtlockBleConnection:
         )
         resolved: list[_ConnectionCandidate] = []
 
-        def _candidate_available(_service_info: object) -> bool:
-            candidate = self._resolve_connection_candidate(
-                include_scanner_paths=True,
-                reason=reason,
-            )
-            if candidate is None:
+        def _candidate_available(service_info: BluetoothServiceInfoBleak) -> bool:
+            if service_info.time <= fresh_after:
+                LOGGER.debug(
+                    "Ignoring replayed connectable history for %s during active "
+                    "acquisition (reason=%s, age=%.1fs)",
+                    address,
+                    reason,
+                    max(0.0, fresh_after - service_info.time),
+                )
                 return False
+            candidate = _ConnectionCandidate(
+                device=service_info.device,
+                resolution="fresh active advertisement",
+                source=service_info.source,
+                rssi=service_info.rssi,
+                advertisement_time=service_info.time,
+            )
             resolved.append(candidate)
             return True
 
