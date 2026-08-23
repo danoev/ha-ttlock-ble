@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import monotonic
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -123,13 +124,48 @@ def mock_ble_device() -> MagicMock:
 
 @pytest.fixture
 def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
-    """Patch `async_ble_device_from_address` in `connection.py`."""
+    """Patch HA's connectable-device and service-info cache lookups."""
     resolver = MagicMock(return_value=mock_ble_device)
-    with patch(
-        "custom_components.ttlock_ble.connection.async_ble_device_from_address",
-        new=resolver,
+    service_info = MagicMock(source="hci0", rssi=-70, time=monotonic())
+    clear_history = MagicMock()
+    learned_interval = MagicMock(return_value=None)
+    resolver.clear_advertisement_history = clear_history
+    resolver.learned_advertising_interval = learned_interval
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.async_ble_device_from_address",
+            new=resolver,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection.async_scanner_devices_by_address",
+            return_value=[],
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection.async_last_service_info",
+            return_value=service_info,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection.async_clear_advertisement_history",
+            new=clear_history,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection."
+            "async_get_learned_advertising_interval",
+            new=learned_interval,
+        ),
     ):
         yield resolver
+
+
+@pytest.fixture
+def mock_active_scan() -> Generator[AsyncMock]:
+    """Patch the HA-managed exact-address advertisement wait."""
+    active_scan = AsyncMock(side_effect=TimeoutError)
+    with patch(
+        "custom_components.ttlock_ble.connection.async_process_advertisements",
+        new=active_scan,
+    ):
+        yield active_scan
 
 
 @pytest.fixture
@@ -143,9 +179,14 @@ def mock_ttlock_client() -> Generator[MagicMock]:
     instance.get_operation_log = AsyncMock(return_value=[])
     instance.lock = AsyncMock(return_value=None)
     instance.unlock = AsyncMock(return_value=None)
+    instance.get_auto_lock_time = AsyncMock(return_value=30)
+    instance.set_auto_lock_time = AsyncMock(return_value=None)
+    instance.add_passcode = AsyncMock(return_value=None)
+    instance.delete_passcode = AsyncMock(return_value=None)
+    instance.clear_passcodes = AsyncMock(return_value=None)
     instance.add_event_listener = MagicMock(return_value=None)
     instance.remove_event_listener = MagicMock(return_value=None)
-    with patch("custom_components.ttlock_ble.connection.TTLockClient") as cls:
+    with patch("custom_components.ttlock_ble.connection.TtlockBleClient") as cls:
         cls.from_ble_device = MagicMock(return_value=instance)
         yield instance
 
@@ -160,7 +201,13 @@ def mock_ttlock_connection() -> Generator[MagicMock]:
     instance.async_get_operation_log = AsyncMock(return_value=[])
     instance.async_lock = AsyncMock(return_value=None)
     instance.async_unlock = AsyncMock(return_value=None)
+    instance.async_get_auto_lock_time = AsyncMock(return_value=30)
+    instance.async_set_auto_lock_time = AsyncMock(return_value=None)
+    instance.async_add_passcode = AsyncMock(return_value=None)
+    instance.async_delete_passcode = AsyncMock(return_value=None)
+    instance.async_clear_passcodes = AsyncMock(return_value=None)
     instance.is_connected = True
+    instance.last_connection_rssi = -70
     with patch("custom_components.ttlock_ble.TtlockBleConnection") as cls:
         cls.return_value = instance
         yield instance

@@ -28,6 +28,7 @@ def _mock_connection(*, query_return=(0, 80)) -> MagicMock:
     conn = MagicMock()
     conn.async_query_state = AsyncMock(return_value=query_return)
     conn.async_get_operation_log = AsyncMock(return_value=[])
+    conn.last_connection_rssi = -70
     return conn
 
 
@@ -61,6 +62,7 @@ async def test_coordinator_polls_state_locked(hass, sample_virtual_key) -> None:
     state = data[sample_virtual_key.lockMac]
     assert state["locked"] is True
     assert state["battery_level"] == 75
+    conn.async_query_state.assert_awaited_once_with(active_scan=True)
 
 
 async def test_coordinator_polls_state_unlocked(hass, sample_virtual_key) -> None:
@@ -80,6 +82,23 @@ async def test_coordinator_blanks_the_readings_when_a_query_returns_none(
     state = data[sample_virtual_key.lockMac]
     assert state["locked"] is None
     assert state["battery_level"] is None
+    conn.async_query_state.assert_awaited_once_with(active_scan=True)
+
+
+async def test_known_state_routine_poll_does_not_request_active_scan(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """Hourly polling remains battery-conscious after bootstrap succeeds."""
+    conn = _mock_connection(query_return=(0, 80))
+    coordinator = _coordinator(hass, {sample_virtual_key.lockMac: conn})
+    coordinator.async_set_updated_data(
+        {sample_virtual_key.lockMac: {"locked": True, "battery_level": 80}}
+    )
+
+    await coordinator._async_update_data()
+
+    conn.async_query_state.assert_awaited_once_with(active_scan=False)
 
 
 async def test_coordinator_polls_every_connection_once(
@@ -112,7 +131,7 @@ def _advertisement(*, unlocked: bool, battery: int = 66):
     )
 
 
-async def test_apply_advertisement_publishes_state_without_polling(
+async def test_apply_advertisement_publishes_battery_without_overwriting_state(
     hass,
     sample_virtual_key,
 ) -> None:
@@ -121,21 +140,49 @@ async def test_apply_advertisement_publishes_state_without_polling(
     coordinator.async_apply_advertisement(
         sample_virtual_key.lockMac,
         _advertisement(unlocked=True, battery=66),
+        rssi=-72,
     )
     state = coordinator.data[sample_virtual_key.lockMac]
-    assert state["locked"] is False
+    assert state["locked"] is None
     assert state["battery_level"] == 66
     conn.async_query_state.assert_not_awaited()
+
+
+async def test_changed_advertisement_hint_requests_active_authoritative_query(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A changed hint may reacquire a route but never becomes physical state."""
+    mac = sample_virtual_key.lockMac
+    conn = _mock_connection(query_return=(1, 65))
+    coordinator = _coordinator(hass, {mac: conn})
+    coordinator.async_set_updated_data({mac: {"locked": True, "battery_level": 70}})
+    coordinator.async_request_refresh = AsyncMock(return_value=None)
+    coordinator.async_apply_advertisement(
+        mac,
+        _advertisement(unlocked=False, battery=69),
+        rssi=-83,
+    )
+    coordinator.async_apply_advertisement(
+        mac,
+        _advertisement(unlocked=True, battery=68),
+        rssi=-82,
+    )
+
+    await coordinator._async_update_data()
+
+    conn.async_query_state.assert_awaited_once_with(active_scan=True)
+    assert coordinator.data[mac]["locked"] is True
 
 
 async def test_apply_advertisement_keeps_the_other_locks(hass) -> None:
     coordinator = _coordinator(hass, {})
     coordinator.async_set_updated_data({"OTHER": {"locked": None}})
     coordinator.async_apply_advertisement(
-        "AA:BB:CC:DD:EE:FF", _advertisement(unlocked=False)
+        "AA:BB:CC:DD:EE:FF", _advertisement(unlocked=False), rssi=-72
     )
     assert coordinator.data["OTHER"] == {"locked": None}
-    assert coordinator.data["AA:BB:CC:DD:EE:FF"]["locked"] is True
+    assert coordinator.data["AA:BB:CC:DD:EE:FF"]["locked"] is None
 
 
 async def test_has_state_is_false_until_a_lock_state_is_known(hass) -> None:
@@ -146,9 +193,51 @@ async def test_has_state_is_false_until_a_lock_state_is_known(hass) -> None:
     )
     assert coordinator.async_has_state("AA:BB:CC:DD:EE:FF") is False
     coordinator.async_apply_advertisement(
-        "AA:BB:CC:DD:EE:FF", _advertisement(unlocked=False)
+        "AA:BB:CC:DD:EE:FF", _advertisement(unlocked=False), rssi=-72
     )
-    assert coordinator.async_has_state("AA:BB:CC:DD:EE:FF") is True
+    assert coordinator.async_has_state("AA:BB:CC:DD:EE:FF") is False
+
+
+async def test_stale_advertisement_cannot_overwrite_authoritative_state(hass) -> None:
+    """Protocol bit 0 is a hint and cannot revert a newer connected query."""
+    mac = "AA:BB:CC:DD:EE:FF"
+    coordinator = _coordinator(hass, {})
+    coordinator.async_set_updated_data({mac: {"locked": True, "battery_level": 80}})
+    coordinator.async_apply_authoritative_state(
+        mac,
+        locked=False,
+        battery_level=None,
+        source="command",
+        rssi=-83,
+    )
+
+    coordinator.async_apply_advertisement(
+        mac,
+        _advertisement(unlocked=False, battery=79),
+        rssi=-84,
+    )
+
+    assert coordinator.data[mac] == {"locked": False, "battery_level": 79}
+    attribution = coordinator.state_attribution(mac)
+    assert attribution is not None
+    assert attribution.source == "command"
+    assert attribution.rssi == -83
+
+
+async def test_query_state_attribution_is_deterministic(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A successful connected query records its source and selected-route RSSI."""
+    conn = _mock_connection(query_return=(1, 60))
+    coordinator = _coordinator(hass, {sample_virtual_key.lockMac: conn})
+
+    await coordinator._async_update_data()
+
+    attribution = coordinator.state_attribution(sample_virtual_key.lockMac)
+    assert attribution is not None
+    assert attribution.source == "query"
+    assert attribution.rssi == -70
 
 
 async def test_poll_that_raises_blanks_only_that_lock(hass, sample_virtual_key) -> None:

@@ -110,6 +110,26 @@
       }
     }
   },
+  "exceptions": {
+    "device_not_found": {
+      "message": "O dispositivo TTLock selecionado não existe mais."
+    },
+    "device_not_loaded": {
+      "message": "O dispositivo TTLock selecionado não está carregado."
+    },
+    "invalid_passcode": {
+      "message": "A senha deve conter entre 4 e 9 dígitos."
+    },
+    "invalid_datetime": {
+      "message": "Informe uma data e hora válidas."
+    },
+    "period_window_required": {
+      "message": "Senhas temporárias exigem início e fim."
+    },
+    "invalid_period_window": {
+      "message": "O fim da senha deve ser posterior ao início."
+    }
+  },
   "entity": {
     "binary_sensor": {
       "connection": {

@@ -56,6 +56,46 @@ async def test_setup_starts_each_connection(
     mock_ttlock_connection.async_start.assert_awaited()
 
 
+async def test_startup_bootstraps_unknown_state_with_active_acquisition(
+    hass,
+    setup_integration,
+    mock_ttlock_connection,
+) -> None:
+    """The first coordinator refresh is active-capable while state is Unknown."""
+    mock_ttlock_connection.async_query_state.assert_awaited_once_with(active_scan=True)
+    assert hass.states.async_all("lock")[0].state == "locked"
+
+
+async def test_startup_active_acquisition_timeout_leaves_state_unknown(
+    hass,
+    sample_stored_key,
+    enable_bluetooth,
+    enable_custom_integrations,
+    mock_cloud,
+    mock_ttlock_connection,
+) -> None:
+    """A failed bounded bootstrap must not invent a physical lock state."""
+    from unittest.mock import AsyncMock
+
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.ttlock_ble.const import DOMAIN
+
+    mock_ttlock_connection.async_query_state = AsyncMock(return_value=None)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"username": "u", "password": "p", "keys": [sample_stored_key]},
+        unique_id="u",
+    )
+    entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    mock_ttlock_connection.async_query_state.assert_awaited_once_with(active_scan=True)
+    assert hass.states.async_all("lock")[0].state == "unknown"
+
+
 async def test_setup_registers_bluetooth_callback_per_lock(
     hass, setup_integration
 ) -> None:
