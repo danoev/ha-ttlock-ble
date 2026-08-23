@@ -27,6 +27,8 @@ from homeassistant.components.bluetooth import (
     BluetoothScanningMode,
     async_address_reachability_diagnostics,
     async_ble_device_from_address,
+    async_clear_advertisement_history,
+    async_get_learned_advertising_interval,
     async_last_service_info,
     async_process_advertisements,
     async_scanner_devices_by_address,
@@ -531,17 +533,13 @@ class TtlockBleConnection:
             )
             return self._client
         await self._async_disconnect_locked()
-        candidate = self._resolve_connection_candidate(
-            include_scanner_paths=active_scan,
+        (
+            candidate,
+            active_acquisition_attempted,
+        ) = await self._async_resolve_initial_candidate_locked(
+            active_scan=active_scan,
             reason=reason,
-            log_miss=True,
         )
-        active_acquisition_attempted = False
-        if candidate is None and active_scan:
-            active_acquisition_attempted = True
-            candidate = await self._async_wait_for_connectable_device_locked(
-                reason=reason,
-            )
         while candidate is not None and not self._closing_event.is_set():
             client = TtlockBleClient.from_ble_device(
                 candidate.device,
@@ -628,6 +626,73 @@ class TtlockBleConnection:
         if not self._closing_event.is_set():
             self._record_reachability_diagnostic(reason, started)
         return None
+
+    async def _async_resolve_initial_candidate_locked(
+        self,
+        *,
+        active_scan: bool,
+        reason: str,
+    ) -> tuple[_ConnectionCandidate | None, bool]:
+        """Resolve history or perform the one initial active acquisition."""
+        candidate = self._resolve_connection_candidate(
+            include_scanner_paths=active_scan,
+            reason=reason,
+            log_miss=True,
+        )
+        if not active_scan or (
+            candidate is not None
+            and not self._candidate_is_stale_for_active_acquisition(candidate)
+        ):
+            return candidate, False
+        return (
+            await self._async_wait_for_connectable_device_locked(reason=reason),
+            True,
+        )
+
+    def _candidate_is_stale_for_active_acquisition(
+        self,
+        candidate: _ConnectionCandidate,
+    ) -> bool:
+        """Prefer fresh discovery when HA has proved a cached route missed cadence."""
+        if candidate.advertisement_time is None:
+            return False
+        learned_interval = async_get_learned_advertising_interval(
+            self._hass,
+            self._key.lockMac,
+        )
+        if learned_interval is None:
+            return False
+        age = max(0.0, MONOTONIC_TIME() - candidate.advertisement_time)
+        freshness_seconds = max(
+            float(EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS),
+            learned_interval * 2,
+        )
+        if age <= freshness_seconds:
+            return False
+        LOGGER.debug(
+            "Cached BLE route for %s missed its learned advertisement cadence; "
+            "using fresh address-scoped acquisition before GATT "
+            "(resolution=%s, source=%s, age=%.1fs, learned_interval=%.1fs, "
+            "freshness_limit=%.1fs)",
+            self._key.lockMac,
+            candidate.resolution,
+            candidate.source,
+            age,
+            learned_interval,
+            freshness_seconds,
+        )
+        return True
+
+    def _active_history_freshness_seconds(self) -> float:
+        """Return a device-aware upper age for active-wait history replay."""
+        learned_interval = async_get_learned_advertising_interval(
+            self._hass,
+            self._key.lockMac,
+        )
+        return max(
+            float(EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS),
+            learned_interval * 2 if learned_interval is not None else 0.0,
+        )
 
     def _record_reachability_diagnostic(
         self,
@@ -760,24 +825,26 @@ class TtlockBleConnection:
         """Wait for this address through HA's Auto-mode active-scan scheduler."""
         address = self._key.lockMac
         started = monotonic()
-        fresh_after = MONOTONIC_TIME()
+        max_history_age = self._active_history_freshness_seconds()
         LOGGER.debug(
             "Starting address-scoped active acquisition for %s "
-            "(reason=%s, timeout=%ds)",
+            "(reason=%s, timeout=%ds, max_history_age=%.1fs)",
             address,
             reason,
             EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+            max_history_age,
         )
         resolved: list[_ConnectionCandidate] = []
 
         def _candidate_available(service_info: BluetoothServiceInfoBleak) -> bool:
-            if service_info.time <= fresh_after:
+            age = max(0.0, MONOTONIC_TIME() - service_info.time)
+            if age > max_history_age:
                 LOGGER.debug(
                     "Ignoring replayed connectable history for %s during active "
                     "acquisition (reason=%s, age=%.1fs)",
                     address,
                     reason,
-                    max(0.0, fresh_after - service_info.time),
+                    age,
                 )
                 return False
             candidate = _ConnectionCandidate(
@@ -790,6 +857,17 @@ class TtlockBleConnection:
             resolved.append(candidate)
             return True
 
+        # TTLock advertisements can be byte-for-byte static. HA deliberately
+        # suppresses callbacks for identical data, even though it still refreshes
+        # aggregate history and diagnostics. Clearing this address's deduplication
+        # state makes the next real local/proxy advertisement observable here.
+        LOGGER.debug(
+            "Clearing Bluetooth advertisement deduplication history for %s "
+            "before active acquisition (reason=%s)",
+            address,
+            reason,
+        )
+        async_clear_advertisement_history(self._hass, address)
         advertisement_task = self._hass.async_create_task(
             async_process_advertisements(
                 self._hass,

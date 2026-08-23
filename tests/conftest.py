@@ -127,6 +127,10 @@ def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
     """Patch HA's connectable-device and service-info cache lookups."""
     resolver = MagicMock(return_value=mock_ble_device)
     service_info = MagicMock(source="hci0", rssi=-70, time=monotonic())
+    clear_history = MagicMock()
+    learned_interval = MagicMock(return_value=None)
+    resolver.clear_advertisement_history = clear_history
+    resolver.learned_advertising_interval = learned_interval
     with (
         patch(
             "custom_components.ttlock_ble.connection.async_ble_device_from_address",
@@ -139,6 +143,15 @@ def mock_ble_resolver(mock_ble_device: MagicMock) -> Generator[MagicMock]:
         patch(
             "custom_components.ttlock_ble.connection.async_last_service_info",
             return_value=service_info,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection.async_clear_advertisement_history",
+            new=clear_history,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection."
+            "async_get_learned_advertising_interval",
+            new=learned_interval,
         ),
     ):
         yield resolver

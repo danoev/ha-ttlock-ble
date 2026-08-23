@@ -3,7 +3,7 @@
 ## 3.5.1 hardware-validation development series
 
 This fork-only prerelease series preserves every published tag. **RC1 through
-RC7 are superseded for testing; use RC8.** They remain available solely as
+RC8 are superseded for testing; use RC9.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease
@@ -30,6 +30,10 @@ reproducible development artefacts and their tag history has not been rewritten.
   that acquisition and performs exactly one fresh HA-managed Active fallback.
   Replayed history is rejected by receipt time, the accepted callback supplies
   the retry route directly, and control commands remain single-send.
+- **RC9** prevents HA's unchanged-advertisement deduplication from starving that
+  fallback. It clears exact-address dedup history before the bounded wait,
+  accepts only device-cadence-bounded recent callbacks, and scans before GATT
+  when learned timing proves aggregate connectable history stale.
 
 ## [3.5.0](https://github.com/roquerodrigo/ha-ttlock-ble/compare/v3.4.0...v3.5.0) (2026-08-07)
 

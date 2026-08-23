@@ -250,6 +250,7 @@ async def test_unknown_state_query_reuses_immediate_connectable_device(
     mock_active_scan,
 ) -> None:
     """Startup does not scan when HA already has a connectable route."""
+    mock_ble_resolver.learned_advertising_interval.return_value = 2.0
     conn = TtlockBleConnection(hass, sample_virtual_key)
 
     assert await conn.async_query_state(active_scan=True) == (0, 80)
@@ -284,6 +285,10 @@ async def test_unknown_state_query_uses_exact_address_active_acquisition(
     assert await conn.async_query_state(active_scan=True) == (0, 80)
 
     mock_active_scan.assert_awaited_once()
+    mock_ble_resolver.clear_advertisement_history.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+    )
     scan_args = mock_active_scan.await_args.args
     assert scan_args[0] is hass
     assert scan_args[2]["address"] == sample_virtual_key.lockMac
@@ -411,6 +416,10 @@ async def test_stale_cached_route_falls_back_to_one_fresh_active_candidate(
         await conn.async_lock()
 
     mock_active_scan.assert_awaited_once()
+    mock_ble_resolver.clear_advertisement_history.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+    )
     assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
     assert (
         connection_module.TtlockBleClient.from_ble_device.call_args_list[0].args[0]
@@ -425,6 +434,107 @@ async def test_stale_cached_route_falls_back_to_one_fresh_active_candidate(
     mock_ttlock_client.lock.assert_not_awaited()
     fresh_client.connect.assert_awaited_once()
     fresh_client.lock.assert_awaited_once()
+
+
+async def test_learned_stale_cached_route_scans_before_gatt(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A route well beyond HA's learned cadence does not burn GATT retries."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    stale_info = SimpleNamespace(
+        device=mock_ble_device,
+        source="hci0",
+        rssi=-83,
+        time=MONOTONIC_TIME() - 156,
+    )
+    fresh_device = MagicMock(name="FreshBLEDevice")
+    fresh_device.address = sample_virtual_key.lockMac
+    mock_ble_resolver.learned_advertising_interval.return_value = 2.0
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        assert callback(_fresh_service_info(fresh_device, rssi=-82)) is True
+
+    mock_active_scan.side_effect = _advertise
+    with patch(
+        "custom_components.ttlock_ble.connection.async_last_service_info",
+        return_value=stale_info,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        await conn.async_lock()
+
+    mock_active_scan.assert_awaited_once()
+    connection_module.TtlockBleClient.from_ble_device.assert_called_once_with(
+        fresh_device,
+        sample_virtual_key,
+        disconnected_callback=conn._on_disconnected,
+    )
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_awaited_once()
+
+
+async def test_active_acquisition_accepts_recent_history(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A usable recent callback is not hidden by a scan-start timestamp gate."""
+    mock_ble_resolver.return_value = None
+    recent_info = SimpleNamespace(
+        device=mock_ble_device,
+        source="hci0",
+        rssi=-83,
+        time=MONOTONIC_TIME() - 9,
+    )
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        assert callback(recent_info) is True
+
+    mock_active_scan.side_effect = _advertise
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    await conn.async_unlock()
+
+    mock_ble_resolver.clear_advertisement_history.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+    )
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_awaited_once()
+
+
+async def test_static_advertisement_is_observed_after_history_clear(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Dedup history is cleared before waiting for the next identical packet."""
+    mock_ble_resolver.return_value = None
+
+    async def _advertise(_hass, callback, *_args) -> None:
+        mock_ble_resolver.clear_advertisement_history.assert_called_once_with(
+            hass,
+            sample_virtual_key.lockMac,
+        )
+        assert callback(_fresh_service_info(mock_ble_device)) is True
+
+    mock_active_scan.side_effect = _advertise
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    await conn.async_lock()
+
+    mock_active_scan.assert_awaited_once()
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_awaited_once()
 
 
 async def test_failed_fresh_candidate_does_not_repeat_active_acquisition(
@@ -505,6 +615,7 @@ async def test_cold_idle_uses_connectable_scanner_path_without_aggregate_history
     mock_ttlock_client.unlock.assert_awaited_once()
 
 
+@pytest.mark.parametrize("source", ["hci0", "esp32-proxy-hall"])
 async def test_active_scan_accepts_delayed_connectable_scanner_path(
     hass,
     sample_virtual_key,
@@ -512,8 +623,9 @@ async def test_active_scan_accepts_delayed_connectable_scanner_path(
     mock_ble_resolver,
     mock_ttlock_client,
     mock_active_scan,
+    source: str,
 ) -> None:
-    """An exact-address callback resolves a proxy-specific connectable path."""
+    """An exact-address callback resolves a local or proxy connectable path."""
     mock_ble_resolver.return_value = None
     scan_started = asyncio.Event()
 
@@ -522,7 +634,7 @@ async def test_active_scan_accepts_delayed_connectable_scanner_path(
         callback(
             _fresh_service_info(
                 mock_ble_device,
-                source="esp32-proxy-hall",
+                source=source,
                 rssi=-78,
             )
         )
@@ -661,6 +773,10 @@ async def test_explicit_acquisition_timeout_does_not_connect(
 
     assert scan_started.is_set()
     active_scan.assert_awaited_once()
+    mock_ble_resolver.clear_advertisement_history.assert_called_once_with(
+        hass,
+        sample_virtual_key.lockMac,
+    )
     assert mock_ble_resolver.call_count == 1
     mock_ttlock_client.connect.assert_not_awaited()
     mock_ttlock_client.lock.assert_not_awaited()

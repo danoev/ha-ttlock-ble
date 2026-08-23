@@ -18,11 +18,11 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc8` is a hardware-validation prerelease, not a
+> Version `3.5.1rc9` is a hardware-validation prerelease, not a
 > production-certified release. It retains released `ttlock-ble==0.1.11` and
-> adds a one-shot fresh-route fallback when HA's cached connectable history
-> proves unreachable, while retaining RC7's authoritative startup bootstrap
-> and RC6's command/state/log corrections. Follow the
+> makes one-shot fresh-route acquisition safe for TTLock's static
+> advertisements under HA deduplication, while retaining RC8's stale-route
+> fallback, RC7's startup bootstrap, and RC6's command/state/log corrections. Follow the
 > staged [real-lock checklist](docs/HARDWARE_VALIDATION.md). Passage mode and
 > further credential work remain excluded.
 
@@ -41,15 +41,19 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
   keypad passcodes and read/set/disable the lock's native auto-lock delay.
 - **Bounded command acquisition** — an explicit command that cannot immediately
   resolve aggregate connectable history also checks HA's per-connectable-scanner
-  paths, then requests one 25-second Home Assistant active scan only if no such
-  path exists. The first candidate goes through the SDK's normal retried GATT
-  connection flow.
+  paths, then requests at most one 25-second Home Assistant active scan when no
+  path exists, learned timing proves aggregate history stale, or a recent
+  pre-command route fails. The accepted candidate goes through the SDK's normal
+  retried GATT connection flow.
 - **Authoritative startup bootstrap** — while state is Unknown, the first
   coordinator query may use the same bounded exact-address Home Assistant
   Active window, without treating advertisement or push hints as bolt state.
 - **Stale-route recovery** — an active-capable operation whose cached HA route
   exhausts its pre-command GATT attempt requests exactly one fresh exact-address
   Active acquisition. A control command is still issued at most once.
+- **Static-advertisement acquisition** — before that one-shot wait, the
+  integration clears HA's exact-address advertisement deduplication state so
+  the next identical local/proxy packet reaches the acquisition callback.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities
@@ -166,9 +170,10 @@ pre-command connection attempt fails, it starts one
 bounded 25-second exact-address `async_process_advertisements()` wait in Active
 scanning mode. Home Assistant schedules that temporary window while the adapter
 remains configured as Auto; local adapters and ESPHome active Bluetooth Proxies
-stay behind the same HA Bluetooth API. A matching callback is resolved again as
-connectable only when its receipt timestamp proves it arrived during the new
-window; that callback's HA route then enters the existing SDK client path.
+stay behind the same HA Bluetooth API. A matching callback is accepted as
+connectable only when its age fits the device-aware freshness window; ancient history is rejected, while recent
+history and the next post-clear static advertisement remain usable. That
+callback's HA route then enters the existing SDK client path.
 The fallback is bounded to one Active acquisition and cannot resend a control
 frame because it completes before authentication or command dispatch. Timeout retains the
 detailed Bluetooth reachability diagnosis. The persistent advertisement

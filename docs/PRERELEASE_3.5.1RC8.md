@@ -1,5 +1,8 @@
 # TTLock BLE 3.5.1rc8
 
+> **Superseded for testing by 3.5.1rc9.** This document and tag remain only as
+> a reproducible development artefact.
+
 This is a **hardware-validation-only prerelease**, not a production-certified
 release. RC1 through RC7 are superseded for testing but their tags and commits
 remain unchanged as reproducible development artefacts. RC8 keeps the released

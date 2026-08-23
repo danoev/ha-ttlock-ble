@@ -138,10 +138,16 @@ Two details are load-bearing:
 The startup coordinator refresh treats Unknown state as an authoritative
 bootstrap. It first reuses an aggregate/per-scanner candidate and, on a miss or
 after that candidate exhausts its pre-command GATT attempt, permits one
-exact-address HA-managed Active wait while the adapter stays Auto. A callback
-record must have a service-info timestamp newer than that wait's registration;
-this rejects HA's immediate cached-history replay and uses the callback's own
-local/proxy `BLEDevice` as the fresh route. A successful `query_state()`
+exact-address HA-managed Active wait while the adapter stays Auto. If HA has
+learned the device's advertising cadence and aggregate history is far beyond
+it, the active-capable caller scans before spending the cached route's GATT
+retry budget. Immediately before the wait, the integration clears HA's
+exact-address advertisement deduplication state: TTLock can emit static bytes,
+and HA otherwise refreshes aggregate time while suppressing callback delivery.
+A callback record must fit a window derived from the 25-second acquisition and
+twice HA's learned maximum interval; this rejects ancient history without
+hiding recent replay. The callback's own local/proxy `BLEDevice` is the route.
+A successful `query_state()`
 publishes Locked/Unlocked; timeout remains Unknown. Explicit entity refreshes
 and changed hints may request the same active-capable query. Once state is
 known, routine interval polls and the background maintenance loop stay

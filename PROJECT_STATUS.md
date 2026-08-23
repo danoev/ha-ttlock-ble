@@ -27,7 +27,7 @@ copied into either MIT project.
   [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble) as `origin`.
 - Home Assistant checkout: `ha-ttlock-ble`, branch
   `codex/hardware-validation-0`, created from `codex/management-actions` for
-  the `3.5.1rc8` prerelease candidate. The original repository remains
+  the `3.5.1rc9` prerelease candidate. The original repository remains
   the `upstream` fetch-only remote and
   [`danoev/ha-ttlock-ble`](https://github.com/danoev/ha-ttlock-ble) as
   `origin`.
@@ -85,6 +85,12 @@ copied into either MIT project.
   by service-info receipt time, and use the fresh callback's direct/proxy route.
   Authentication and command dispatch occur only after this fallback, so lock
   and unlock remain single-send. Background maintenance stays non-active.
+- RC9 accounts for HA's unchanged-advertisement deduplication. Before the one
+  bounded exact-address wait it clears only that address's advertisement
+  history, accepts callbacks within a learned-cadence-aware age window, and
+  uses the callback route directly. When HA has learned the device cadence, an
+  aggregate route far beyond it goes to Active acquisition before spending the
+  connector retry budget. No SDK or command-result path changes.
 
 The Home Assistant integration intentionally continues to depend on the
 released `ttlock-ble==0.1.11`. Its passcode and auto-lock actions therefore
@@ -106,8 +112,8 @@ Current local branches:
 
 - `ttlock-ble`: 303 tests passed, 97.31% coverage; Ruff and configured strict
   mypy pass.
-- `ha-ttlock-ble`: 332 tests passed with 98.13% coverage; Ruff and configured
-  mypy pass locally. Hosted RC8 checks are pending publication.
+- `ha-ttlock-ble`: 336 tests passed with 98.15% coverage; Ruff and configured
+  mypy pass locally. Hosted RC9 checks are pending publication.
 - `manifest.json`, `hacs.json`, translation JSON, and `services.yaml` parse;
   the manifest and project versions agree.
 
@@ -128,7 +134,7 @@ version it has selected for download. Fork prerelease tags use `@danoev`, but
 the fork's default `main` still points at the upstream stable source containing
 `@roquerodrigo`. With prerelease display disabled—or before a forced repository
 refresh clears cached metadata—HACS therefore continues to show the stable
-default-branch author. The RC8 source metadata itself is correct; this is a
+default-branch author. The RC9 source metadata itself is correct; this is a
 version-selection/cache effect and is non-blocking for Bluetooth validation.
 
 A local Home Assistant `check_config` run is not a faithful gate in this
@@ -164,7 +170,7 @@ Recommendation: make an on-demand-only mode the preferred low-battery design
 for users who accept losing between-command real-time push events, while
 retaining periodic/persistent listening as an explicit opt-in. The existing
 `permanent_connection` option should remain explicit because reconnecting
-immediately after every idle drop is the highest-drain mode. RC8 deliberately
+immediately after every idle drop is the highest-drain mode. RC9 deliberately
 does not change the maintenance loop or its defaults; that architecture change
 needs separate UX, migration, event-loss and hardware-battery validation.
 
@@ -172,26 +178,28 @@ A successful background maintenance connection authenticates a client but does
 not itself call `query_state()` or publish coordinator state. Candidate misses
 back off through the connection loop's bounded retry cadence and can therefore
 be quiet in the UI. A long observed gap between successful connections is not
-evidence of a configured one-hour reconnect interval; RC8 leaves this separate
+evidence of a configured one-hour reconnect interval; RC9 leaves this separate
 battery/event-delivery design question unchanged.
 
 Advertisement-history clearing was reviewed but is not used. Home Assistant
 documents it for forcing an otherwise identical advertisement to be processed
-as new. RC8 instead reads existing HA aggregate and per-scanner representations;
-the current HA implementation also removes connectable history, so clearing it
-could discard useful state and affect other Bluetooth consumers of that
-address.
+as new. RC9 now uses the distinct documented
+`async_clear_advertisement_history` API only immediately before a bounded
+exact-address acquisition. HA documents this as clearing advertisement
+deduplication rather than integration matcher history; the next actual local or
+proxy packet restores current route history.
 
 ## Hardware status
 
 The protocol 5.3 / scene 2 lock at `B6:D4:1E:DB:15:F8` has proved passive
 battery, authenticated GATT, and 6/6 physical cold-idle lock/unlock through Home
-Assistant under RC5. RC7 then produced four successful cold-idle commands under
-Auto before a later command repeatedly used approximately three-minute-old HA
-connectable history. RC8 must prove fresh-route fallback for that case, retain
-authoritative startup bootstrap, and pass the 3 Unlock + 3 Lock smoke test
-without false failures, state reversal, duplicate commands, or historical-log
-flood. The 10 + 10 gate remains required for release readiness.
+Assistant under RC5. RC8 proved one Auto-mode no-candidate acquisition and
+correctly entered stale-route fallback, but HA deduplicated a static
+advertisement received during the fallback window. RC9 must prove that packet
+now reaches acquisition, retain authoritative startup bootstrap, and pass the
+3 Unlock + 3 Lock smoke test without false failures, state reversal, duplicate
+commands, or historical-log flood. The 10 + 10 gate remains required for
+release readiness.
 
 ## Unsupported or intentionally deferred features
 
@@ -224,8 +232,8 @@ flood. The 10 + 10 gate remains required for release readiness.
 
 ## Next milestone
 
-1. Install the `3.5.1rc8` GitHub prerelease as a HACS custom-repository version
-   and run the Auto-mode stale cached-route case plus Unknown-state startup
+1. Install the `3.5.1rc9` GitHub prerelease as a HACS custom-repository version
+   and run the Auto-mode static-advertisement stale-route case plus Unknown-state startup
    bootstrap in the updated runbook, followed by the cold-idle 3 unlock + 3
    lock smoke test with no phone/keypad interaction. Expand to 10 + 10 only
    after all three pass.
