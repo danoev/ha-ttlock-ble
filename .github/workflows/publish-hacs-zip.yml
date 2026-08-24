@@ -1,0 +1,62 @@
+name: Publish HACS install ZIP
+
+# GitHub documents `published` as the release activity that covers both stable
+# releases and prereleases, including prereleases first saved as drafts.
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: hacs-zip-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Attach ttlock_ble.zip
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Package the tracked integration files
+        run: >-
+          git archive --format=zip
+          --output "$RUNNER_TEMP/ttlock_ble.zip"
+          HEAD:custom_components/ttlock_ble
+
+      - name: Validate the install archive
+        env:
+          ARCHIVE: ${{ runner.temp }}/ttlock_ble.zip
+        run: |
+          python - <<'PY'
+          import os
+          from zipfile import ZipFile
+
+          with ZipFile(os.environ["ARCHIVE"]) as archive:
+              files = {name for name in archive.namelist() if not name.endswith("/")}
+
+          if "manifest.json" not in files:
+              raise SystemExit("ttlock_ble.zip has no root manifest.json")
+          if any(
+              name.startswith(("custom_components/", "ttlock_ble/"))
+              for name in files
+          ):
+              raise SystemExit("ttlock_ble.zip contains an unexpected directory prefix")
+          PY
+
+      - name: Attach the HACS asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload "$TAG" "$RUNNER_TEMP/ttlock_ble.zip"
+          --clobber --repo "$REPOSITORY"
