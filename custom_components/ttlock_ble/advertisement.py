@@ -1,4 +1,4 @@
-"""Passive advertisement tracking for ttlock_ble."""
+"""Passive TTLock advertisement hints and battery tracking."""
 
 from __future__ import annotations
 
@@ -33,16 +33,12 @@ class TtlockBleAdvertisementTracker:
     """
     Keep lock state fresh from the advertisements HA's bluetooth manager sees.
 
-    The firmware publishes the bolt position and the battery level in the
-    manufacturer data of every advertisement, so tracking them costs no
-    BLE session at all. This is the only channel that reports an
-    out-of-band change — auto-lock, the official app, a keypad code —
-    once the lock has dropped the connection it pushes events on, which
-    it does within seconds of going idle.
-
-    An advertisement that decodes into a state also postpones the next
-    poll: `async_set_updated_data` reschedules the coordinator, so a lock
-    that keeps advertising is never connected to just to be read.
+    Protocol 5.3 calls manufacturer flag bit 0 ``isUnlock``. RC5 could not
+    attribute its false Locked transitions between this bit and a short push
+    state, so neither is safe as authoritative persistent state without fresh
+    evidence. Passive tracking still provides battery and wakes a connected
+    state query when the hint changes; explicit commands request their own
+    bounded active scan.
     """
 
     def __init__(
@@ -62,7 +58,7 @@ class TtlockBleAdvertisementTracker:
                 self._hass,
                 partial(self._async_on_advertisement, key.lockMac),
                 BluetoothCallbackMatcher(address=key.lockMac, connectable=False),
-                BluetoothScanningMode.ACTIVE,
+                BluetoothScanningMode.PASSIVE,
             )
             for key in virtual_keys
         ]
@@ -77,7 +73,11 @@ class TtlockBleAdvertisementTracker:
         """Adopt the advertised state, or fall back to a poll when it can't be read."""
         advertisement = self._decode(mac, service_info)
         if advertisement is not None:
-            self._coordinator.async_apply_advertisement(mac, advertisement)
+            self._coordinator.async_apply_advertisement(
+                mac,
+                advertisement,
+                rssi=service_info.rssi,
+            )
             return
         if self._coordinator.async_has_state(mac):
             return

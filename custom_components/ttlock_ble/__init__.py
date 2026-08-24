@@ -20,6 +20,7 @@ from ttlock_ble import VirtualKey
 from .advertisement import TtlockBleAdvertisementTracker
 from .connection import TtlockBleConnection
 from .const import (
+    CONF_BACKGROUND_MAINTENANCE,
     CONF_PERMANENT_CONNECTION,
     CONF_RECONNECT_INTERVAL,
     DEFAULT_RECONNECT_INTERVAL_SECONDS,
@@ -29,10 +30,13 @@ from .const import (
 )
 from .coordinator import TtlockBleDataUpdateCoordinator
 from .data import TtlockBleData
+from .log_history import TtlockBleLogHistory
+from .services import async_setup_services
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.device_registry import DeviceEntry
+    from homeassistant.helpers.typing import ConfigType
 
     from .data import (
         TtlockBleConfigData,
@@ -46,6 +50,12 @@ PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.SENSOR,
 ]
+
+
+async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
+    """Register integration-wide local management actions."""
+    await async_setup_services(hass)
+    return True
 
 
 def _configured_macs(config: TtlockBleConfigData) -> set[str]:
@@ -104,8 +114,16 @@ async def async_setup_entry(
     _async_prune_stale_devices(hass, entry, config)
     stored_keys: list[TtlockBleStoredKey] = list(config["keys"])
     virtual_keys = [VirtualKey.from_dict(dict(k)) for k in stored_keys]
+    log_history = TtlockBleLogHistory(hass, entry.entry_id)
+    await log_history.async_load()
 
     permanent_connection = bool(entry.options.get(CONF_PERMANENT_CONNECTION, False))
+    background_maintenance = permanent_connection or bool(
+        entry.options.get(
+            CONF_BACKGROUND_MAINTENANCE,
+            CONF_RECONNECT_INTERVAL in entry.options,
+        ),
+    )
     reconnect_cooldown_seconds: float = (
         0.0
         if permanent_connection
@@ -121,11 +139,12 @@ async def async_setup_entry(
             hass,
             key,
             reconnect_cooldown_seconds=reconnect_cooldown_seconds,
+            log_history=log_history,
         )
         for key in virtual_keys
     }
     for connection in connections.values():
-        await connection.async_start()
+        await connection.async_start(maintain=background_maintenance)
 
     scan_interval_seconds: int = int(
         entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_SECONDS),
@@ -156,6 +175,7 @@ async def async_setup_entry(
     # last-registered-first, so tracking stops before the connections do.
     entry.async_on_unload(_stop_connections)
     entry.async_on_unload(_stop_advertisement_tracking)
+    entry.async_on_unload(log_history.async_save)
 
     # Trigger the first state refresh without awaiting it, so the config entry
     # can finish loading while connections settle. The task is still tracked by

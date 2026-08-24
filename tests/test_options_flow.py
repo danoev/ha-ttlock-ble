@@ -4,6 +4,7 @@ from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.ttlock_ble.const import (
+    CONF_BACKGROUND_MAINTENANCE,
     CONF_PERMANENT_CONNECTION,
     CONF_RECONNECT_INTERVAL,
     DEFAULT_RECONNECT_INTERVAL_SECONDS,
@@ -27,6 +28,7 @@ async def test_options_flow_shows_form_with_defaults(hass, setup_integration):
         == DEFAULT_RECONNECT_INTERVAL_SECONDS
     )
     assert _schema_default(result, CONF_PERMANENT_CONNECTION) is False
+    assert _schema_default(result, CONF_BACKGROUND_MAINTENANCE) is False
 
 
 async def test_options_flow_persists_all_options(hass, setup_integration):
@@ -36,12 +38,14 @@ async def test_options_flow_persists_all_options(hass, setup_integration):
         user_input={
             CONF_SCAN_INTERVAL: 60,
             CONF_RECONNECT_INTERVAL: 120,
+            CONF_BACKGROUND_MAINTENANCE: True,
             CONF_PERMANENT_CONNECTION: True,
         },
     )
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert setup_integration.options[CONF_SCAN_INTERVAL] == 60
     assert setup_integration.options[CONF_RECONNECT_INTERVAL] == 120
+    assert setup_integration.options[CONF_BACKGROUND_MAINTENANCE] is True
     assert setup_integration.options[CONF_PERMANENT_CONNECTION] is True
 
 
@@ -51,6 +55,7 @@ async def test_options_flow_uses_existing_values_as_defaults(hass, setup_integra
         options={
             CONF_SCAN_INTERVAL: 120,
             CONF_RECONNECT_INTERVAL: 30,
+            CONF_BACKGROUND_MAINTENANCE: True,
             CONF_PERMANENT_CONNECTION: True,
         },
     )
@@ -58,4 +63,5 @@ async def test_options_flow_uses_existing_values_as_defaults(hass, setup_integra
     result = await hass.config_entries.options.async_init(setup_integration.entry_id)
     assert _schema_default(result, CONF_SCAN_INTERVAL) == 120
     assert _schema_default(result, CONF_RECONNECT_INTERVAL) == 30
+    assert _schema_default(result, CONF_BACKGROUND_MAINTENANCE) is True
     assert _schema_default(result, CONF_PERMANENT_CONNECTION) is True

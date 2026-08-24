@@ -1,25 +1,59 @@
 # Home Assistant TTLock BLE
 
-[![CI](https://github.com/roquerodrigo/ha-ttlock-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/roquerodrigo/ha-ttlock-ble/actions/workflows/ci.yml)
+> [!IMPORTANT]
+> This is a maintained development fork of
+> [`roquerodrigo/ha-ttlock-ble`](https://github.com/roquerodrigo/ha-ttlock-ble),
+> whose upstream work remains credited and preserved. Report problems specific
+> to this fork to the
+> [`danoev/ha-ttlock-ble` issue tracker](https://github.com/danoev/ha-ttlock-ble/issues),
+> not to the upstream project.
+
+[![CI](https://github.com/danoev/ha-ttlock-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/danoev/ha-ttlock-ble/actions/workflows/ci.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=roquerodrigo&repository=ha-ttlock-ble&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=danoev&repository=ha-ttlock-ble&category=integration)
 
 ---
 
-Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock / unlock, battery level and real-time push events flow over BLE — no cloud round-trip on every operation. Built on the sibling Python SDK [`ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
+Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock/unlock, authoritative state queries, passive battery updates, and operation-log reconciliation use BLE without a cloud round-trip on every operation. This fork uses the maintained sibling SDK fork [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble), based on and preserving credit to [`roquerodrigo/ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
+
+> [!CAUTION]
+> Version `3.5.1rc10` is a hardware-validation prerelease, not a
+> production-certified release. It pins an immutable commit of the maintained
+> SDK fork to provide a one-attempt speculative cached route, then retains
+> RC9's one-shot fresh-route acquisition and robust GATT policy. Follow the
+> staged [real-lock checklist](docs/HARDWARE_VALIDATION.md). Passage mode and
+> further credential work remain excluded.
 
 ## Features
 
 - **Local BLE control** — lock, unlock, and state queries run over the lock's BLE link; the TTLock cloud is only contacted once at setup to download per-lock keys.
-- **Real-time push events** — keypad presses, fingerprint reads, IC-card swipes, mechanical key turns, and auto-lock fires arrive as Home Assistant events the moment the lock emits them.
-- **Battery sensor** — diagnostic entity refreshed by every poll *and* every push, no extra BLE traffic.
+- **External-activity reconciliation** — changed advertisement state hints and rising new-record hints request an authoritative query/log sync. Responsiveness remains firmware- and radio-dependent and must be verified on each lock.
+- **Battery sensor** — valid advertisements update battery immediately without a GATT connection; connected queries provide an authoritative sanity check.
 - **2FA-aware config flow** — handles TTLock's "new device" verification by emailing a one-time code and prompting for it.
 - **Works without a cloud account** — a lock initialised locally can be added by entering its key directly, no TTLock account involved at any point.
-- **Passive state tracking** — the bolt position and battery level are read from the lock's own BLE advertisements, with no connection and no battery cost. This is what catches an auto-lock or an operation done from the official app.
-- **Persistent BLE session with a post-drop cooldown** — keeps the link warm to receive push events, and waits before reconnecting so a lock in idle-sleep isn't thrashed.
+- **Passive Bluetooth hints** — advertisements update battery and signal a possible state change without claiming their protocol bit is persistent bolt position; connected state queries remain authoritative.
+- **On-demand default lifecycle** — after startup, explicit work and the hourly sanity poll connect as needed. Five-minute background reconnect maintenance and permanent connection remain explicit opt-ins.
 - **Reauth + reconfigure** — re-prompt for credentials in place when the cloud rejects the cached login, or edit them via the integration's three-dot menu.
 - **Diagnostics** — downloadable dump with credentials/keys redacted.
+- **Local management actions** — create/delete permanent or time-windowed
+  keypad passcodes and read/set/disable the lock's native auto-lock delay.
+- **Bounded command acquisition** — an explicit command that cannot immediately
+  resolve aggregate connectable history also checks HA's per-connectable-scanner
+  paths, gives cached history one speculative connector attempt, then requests
+  at most one 25-second Home Assistant active scan when no
+  path exists, learned timing proves aggregate history stale, or a recent
+  pre-command route fails. The accepted candidate goes through the SDK's normal
+  robust three-attempt GATT connection flow.
+- **Authoritative startup bootstrap** — while state is Unknown, the first
+  coordinator query may use the same bounded exact-address Home Assistant
+  Active window, without treating advertisement or push hints as bolt state.
+- **Stale-route recovery** — an active-capable operation whose cached HA route
+  exhausts its pre-command GATT attempt requests exactly one fresh exact-address
+  Active acquisition. A control command is still issued at most once.
+- **Static-advertisement acquisition** — before that one-shot wait, the
+  integration clears HA's exact-address advertisement deduplication state so
+  the next identical local/proxy packet reaches the acquisition callback.
 - **Translations** — English and Brazilian Portuguese (parity enforced by tests).
 
 ## Entities
@@ -33,11 +67,11 @@ Each configured lock produces one HA device with four entities:
 | `binary_sensor.<alias>_connection` | `binary_sensor` | Live BLE link state (connectivity, diagnostic). |
 | `event.<alias>_log` | `event` | Fires for every new operation-log record read from the lock. |
 
-The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `password_change` or `other`, and attaches `record_type` and `battery` always, plus `timestamp`, `uid`, `credential`, `key_id` and `accessory_battery` when the record carries them. `credential` is only populated for record types where the value is an identifier (card number, fingerprint id, fob MAC) — record types where it would be a working door code never expose it.
+The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `password_change` or `other`, adds a safe method such as `fingerprint`, `ic_card`, `passcode`, `physical_key`, `ttlock_app` or `gateway`, and includes non-secret timestamp/battery/UID/accessory fields when available. The SDK's overloaded credential field is never exported: it can be a working PIN, card number, fob address, or identifier depending on firmware.
 
 ## Installation
 
-1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration).
+1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled; select `v3.5.1rc10` from the version list. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
 2. Restart Home Assistant.
 3. Settings → Devices & Services → Add Integration → **TTLock BLE**.
 4. Choose how the keys are obtained:
@@ -67,20 +101,86 @@ The Bluetooth radio HA already manages (USB dongle, built-in adapter, or proxy) 
 
 Settings → Devices & Services → TTLock BLE → **Configure** lets you tune:
 
-- `scan_interval` (default 3600 s, minimum 60 s) — how often the coordinator opens a BLE session to read state. Every advertisement received postpones the next poll, so a lock in range is rarely polled at all; lowering this only adds connections (and battery drain) for a lock that has gone quiet.
-- `reconnect_interval` (default 300 s, minimum 10 s) — how long the connection layer waits after the lock drops the BLE session before reconnecting. The lock closes every idle session within seconds, so this is effectively how often a session is reopened to listen for push events.
+- `scan_interval` (default 3600 s, minimum 60 s) — how often the coordinator opens a BLE session for an authoritative state read. Advertisement hints do not postpone this poll; lowering the interval adds connections and battery drain.
+- `background_maintenance` (default off) — opt into reopening idle BLE sessions between normal work. Entries that explicitly configured `reconnect_interval` before RC10 retain that legacy behaviour until this option is turned off.
+- `reconnect_interval` (default 300 s, minimum 10 s) — cooldown used only by optional background maintenance.
 - `permanent_connection` (default off) — reconnect immediately after every drop, keeping the session open as continuously as the lock allows. Overrides `reconnect_interval` and increases the lock's battery drain; push events (keypad, auto-lock) arrive in real time in exchange.
 
 To edit credentials without removing and re-adding, use the integration's three-dot menu → **Reconfigure**.
+
+## Local management actions
+
+The first management backend is exposed as Home Assistant actions. Select the
+lock through the device picker; each action then connects through Home
+Assistant's Bluetooth manager, so a local adapter and an ESPHome active
+Bluetooth Proxy follow the same path.
+
+| Action | Purpose |
+|---|---|
+| `ttlock_ble.add_passcode` | Add a permanent or date/time-windowed keypad passcode. |
+| `ttlock_ble.delete_passcode` | Delete the specified keypad passcode. |
+| `ttlock_ble.clear_passcodes` | Irreversibly remove every keypad passcode stored by the lock. |
+| `ttlock_ble.get_auto_lock` | Return `seconds`, the current native auto-lock delay. |
+| `ttlock_ble.set_auto_lock` | Set the native delay; `seconds: 0` disables auto-lock. |
+
+Temporary windows are interpreted in Home Assistant's configured time zone and
+sent to the lock with minute precision. Correct behaviour therefore depends on
+the lock's RTC representing the same local wall clock; verify the clock before
+using a temporary credential on real hardware.
+
+The integration does not retain a submitted passcode, write it to its logs, add
+it to entity attributes, or include it in diagnostics/events. A passcode placed
+directly in an automation or script is still stored in that Home Assistant YAML
+and may appear in Home Assistant's automation trace, so protect the automation
+configuration accordingly.
+
+Example temporary passcode:
+
+```yaml
+action: ttlock_ble.add_passcode
+data:
+  device_id: 0123456789abcdef0123456789abcdef
+  code: "583921"
+  type: period
+  start: "2026-08-22T15:00:00"
+  end: "2026-08-25T10:00:00"
+```
 
 ## How it works
 
 The lock's TTLock firmware aggressively closes idle BLE sessions (~5 s of silence and it drops). The integration:
 
-1. Reads the bolt position and battery level straight out of the lock's BLE advertisements. This costs no connection at all and is the only channel that reports an operation performed while Home Assistant is not connected — an auto-lock, the official app, a keypad code.
-2. Keeps a persistent BLE session via `connection.py`, reconnecting on every drop signalled by bleak, and waiting out the configured `reconnect_interval` before doing so — or none at all with `permanent_connection`.
-3. After a user-initiated `lock`/`unlock`, the SDK keeps the link alive for 25 s so push events (the lock's reports of keypad operations, auto-locks, etc.) reach Home Assistant in real time.
-4. Each push event carries the decoded `lock_state` and `battery` when the firmware emits a heartbeat-style payload, letting the entities update without a follow-up query.
+1. Passively reads battery and a protocol state-change hint from advertisements. Neither overwrites authoritative connected state.
+2. On startup while state is Unknown, performs an authoritative query and may request one bounded exact-address HA-managed Active window if no route is cached or a cached route proves unreachable before the query. Known-state routine polls remain non-active.
+3. After a successful startup read, normally stays on demand: advertisement hints, explicit actions, and the hourly sanity poll schedule work. Unknown startup state retries with bounded backoff. Optional background/permanent modes retain the older reconnect loop.
+4. After a user-initiated `lock`/`unlock`, the SDK keeps the link alive for 25 s so push events (the lock's reports of keypad operations, auto-locks, etc.) reach Home Assistant in real time.
+5. Advertisement and short-heartbeat push state are hints. A change triggers a connected `SEARCH_BICYCLE_STATUS` query, and every applied transition logs its safe source, age, and route RSSI.
+6. If lock/unlock wrote its complete control frame but lost the acknowledgement, the command is never resent. One fresh state query may reconcile it to success; otherwise Home Assistant reports the outcome as unknown.
+
+### Passive versus connectable Bluetooth
+
+Home Assistant can receive a TTLock passive advertisement without currently
+having a connectable `BLEDevice`. The passive packet is sufficient for battery
+and change detection, but authoritative state, lock/unlock, and local
+credential or auto-lock management need a connectable path.
+
+For explicit operations, Unknown-state startup bootstrap, or an advertisement
+activity hint, the integration first checks Home Assistant's
+connectable-device cache. A cached route gets one speculative connector
+attempt. If it is absent or that attempt fails before authentication/control,
+the integration starts one
+bounded 25-second exact-address `async_process_advertisements()` wait in Active
+scanning mode. Home Assistant schedules that temporary window while the adapter
+remains configured as Auto; local adapters and ESPHome active Bluetooth Proxies
+stay behind the same HA Bluetooth API. A matching callback is accepted as
+connectable only when its age fits the device-aware freshness window; ancient history is rejected, while recent
+history and the next post-clear static advertisement remain usable. That
+callback's HA route then enters the existing SDK client path.
+The fallback is bounded to one Active acquisition and cannot resend a control
+frame because it completes before authentication or command dispatch. Timeout retains the
+detailed Bluetooth reachability diagnosis. The persistent advertisement
+tracker is Passive, and routine polling/background maintenance never globally
+activate a scanner. The default lifecycle does not run background maintenance.
 
 ## Useful commands
 
@@ -106,12 +206,13 @@ rm config/.storage/core.entity_registry config/.storage/core.device_registry
 ```
 custom_components/ttlock_ble/
 ├── __init__.py        # config-entry lifecycle: setup / unload / reload
-├── advertisement.py   # TtlockBleAdvertisementTracker: state from advertisements
+├── advertisement.py   # passive battery and state-change hints
 ├── api.py             # TtlockBleApiClient: TTLockCloud wrapper (cloud bootstrap only)
 ├── binary_sensor.py   # TtlockBleConnectionBinarySensor: live BLE link state
+├── client.py          # explicit-control stage and outcome attribution
 ├── brand/             # icon / logo PNGs (local placeholder for HA brand registry)
 ├── config_flow.py     # menu / cloud / manual / verify_code / reauth / reconfigure
-├── connection.py      # TtlockBleConnection: persistent BLE session per lock
+├── connection.py      # serialized on-demand/optional-maintained BLE session
 ├── const.py           # DOMAIN, LOGGER, defaults
 ├── coordinator.py     # DataUpdateCoordinator polling each connection
 ├── data/              # one TypedDict/dataclass per file + type aliases in __init__.py
@@ -122,8 +223,11 @@ custom_components/ttlock_ble/
 ├── lock.py            # TtlockBleLock: LockEntity backed by the connection
 ├── manifest.json
 ├── manual_key.py      # TtlockBleManualKey: key entry for cloud-less locks
-├── options_flow.py    # TtlockBleOptionsFlow: scan_interval, reconnect_interval, permanent_connection
+├── log_history.py     # bounded non-secret operation-log replay journal
+├── options_flow.py    # polling and optional background/permanent connection modes
 ├── sensor.py          # TtlockBleBatterySensor backed by polls + pushes
+├── services.py        # device-targeted passcode and auto-lock actions
+├── services.yaml      # action descriptions and selectors
 └── translations/
     ├── en.json
     └── pt-BR.json

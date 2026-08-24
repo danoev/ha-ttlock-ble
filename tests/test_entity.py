@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, format_mac
 
@@ -89,3 +90,20 @@ async def test_entity_lock_state_reads_from_coordinator(
     }
     assert entity._lock_state is not None
     assert entity._lock_state["locked"] is True
+
+
+async def test_explicit_entity_update_requests_active_state_refresh(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """An explicit HA entity refresh opts into bounded active acquisition."""
+    entity = _entity(hass, sample_virtual_key)
+    entity.coordinator.async_request_active_state_refresh = MagicMock()
+    entity.coordinator.async_request_refresh = AsyncMock()
+
+    await entity.async_update()
+
+    entity.coordinator.async_request_active_state_refresh.assert_called_once_with(
+        sample_virtual_key.lockMac
+    )
+    entity.coordinator.async_request_refresh.assert_awaited_once_with()

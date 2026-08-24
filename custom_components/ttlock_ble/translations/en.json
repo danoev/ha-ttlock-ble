@@ -100,14 +100,36 @@
         "data": {
           "scan_interval": "Polling interval (seconds)",
           "reconnect_interval": "Reconnection interval (seconds)",
+          "background_maintenance": "Background reconnect maintenance",
           "permanent_connection": "Permanent connection"
         },
         "data_description": {
           "scan_interval": "How often the state is read over a BLE session. Advertisements postpone the next read, so an in-range lock is rarely polled.",
-          "reconnect_interval": "How long to wait after the lock drops the BLE session before reconnecting.",
+          "reconnect_interval": "How long optional background maintenance waits after the lock drops the BLE session before reconnecting.",
+          "background_maintenance": "Keep reopening idle BLE sessions in the background. Off by default to reduce lock battery use and Bluetooth traffic; Unknown startup state still retries automatically.",
           "permanent_connection": "Reconnect immediately after every drop, keeping the session always open. Ignores the reconnection interval and increases the lock's battery drain."
         }
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "The selected TTLock device no longer exists."
+    },
+    "device_not_loaded": {
+      "message": "The selected TTLock device is not loaded."
+    },
+    "invalid_passcode": {
+      "message": "The passcode must contain 4-9 digits."
+    },
+    "invalid_datetime": {
+      "message": "Enter a valid date and time."
+    },
+    "period_window_required": {
+      "message": "Period passcodes require both a start and an end."
+    },
+    "invalid_period_window": {
+      "message": "The passcode end must be after its start."
     }
   },
   "entity": {
