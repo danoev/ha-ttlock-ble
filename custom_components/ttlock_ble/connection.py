@@ -55,6 +55,8 @@ if TYPE_CHECKING:
 RECONNECT_INITIAL_BACKOFF = 1.0
 RECONNECT_MAX_BACKOFF = 300.0
 EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS = 25
+SPECULATIVE_CACHED_CONNECT_ATTEMPTS = 1
+ROBUST_CONNECT_ATTEMPTS = 3
 
 # The lock answers the operation log one record per BLE frame, each with
 # its own timeout, and the SDK holds its command lock for the whole
@@ -517,10 +519,17 @@ class TtlockBleConnection:
             reason=reason,
         )
         while candidate is not None and not self._closing_event.is_set():
+            speculative_cached_route = active_scan and not active_acquisition_attempted
+            connect_attempts = (
+                SPECULATIVE_CACHED_CONNECT_ATTEMPTS
+                if speculative_cached_route
+                else ROBUST_CONNECT_ATTEMPTS
+            )
             client = TtlockBleClient.from_ble_device(
                 candidate.device,
                 self._key,
                 disconnected_callback=self._on_disconnected,
+                connect_attempts=connect_attempts,
             )
             connect_started = monotonic()
             age = (
@@ -531,7 +540,8 @@ class TtlockBleConnection:
             LOGGER.debug(
                 "Opening BLE connection for %s "
                 "(reason=%s, resolution=%s, source=%s, RSSI=%s, age=%s, "
-                "candidate_elapsed=%.1fs; GATT retries delegated to ttlock-ble)",
+                "candidate_elapsed=%.1fs, speculative_cached_route=%s, "
+                "connect_attempts=%d; GATT retries delegated to ttlock-ble)",
                 self._key.lockMac,
                 reason,
                 candidate.resolution,
@@ -539,6 +549,8 @@ class TtlockBleConnection:
                 candidate.rssi if candidate.rssi is not None else "unknown",
                 f"{age:.1f}s" if age is not None else "unknown",
                 connect_started - started,
+                speculative_cached_route,
+                connect_attempts,
             )
             try:
                 await client.connect()

@@ -82,6 +82,7 @@ class TtlockBleClient(TTLockClient):
         device: BLEDevice | None = None,
         disconnected_callback: Callable[[BleakClient], None] | None = None,
         keep_alive_after_command: float = 25.0,
+        connect_attempts: int = 3,
     ) -> None:
         """Configure command-stage tracking around the SDK client."""
         self._ha_disconnected_callback = disconnected_callback
@@ -98,6 +99,7 @@ class TtlockBleClient(TTLockClient):
             device=device,
             disconnected_callback=self._ha_on_disconnected,
             keep_alive_after_command=keep_alive_after_command,
+            connect_attempts=connect_attempts,
         )
 
     @classmethod
@@ -108,6 +110,7 @@ class TtlockBleClient(TTLockClient):
         *,
         disconnected_callback: Callable[[BleakClient], None] | None = None,
         keep_alive_after_command: float = 25.0,
+        connect_attempts: int = 3,
     ) -> Self:
         """Build around a BLE device resolved by Home Assistant."""
         return cls(
@@ -115,6 +118,7 @@ class TtlockBleClient(TTLockClient):
             device=device,
             disconnected_callback=disconnected_callback,
             keep_alive_after_command=keep_alive_after_command,
+            connect_attempts=connect_attempts,
         )
 
     @property

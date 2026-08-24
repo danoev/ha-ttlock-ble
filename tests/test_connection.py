@@ -17,6 +17,8 @@ from ttlock_ble import KeyboardPwdType, LockEvent, LockState, TTLockClient, TTLo
 from custom_components.ttlock_ble.client import ControlOutcomeUnknownError
 from custom_components.ttlock_ble.connection import (
     EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+    ROBUST_CONNECT_ATTEMPTS,
+    SPECULATIVE_CACHED_CONNECT_ATTEMPTS,
     TtlockBleConnection,
     connection_signal,
     event_signal,
@@ -441,8 +443,20 @@ async def test_stale_cached_route_falls_back_to_one_fresh_active_candidate(
         is mock_ble_device
     )
     assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args_list[0].kwargs[
+            "connect_attempts"
+        ]
+        == SPECULATIVE_CACHED_CONNECT_ATTEMPTS
+    )
+    assert (
         connection_module.TtlockBleClient.from_ble_device.call_args_list[1].args[0]
         is fresh_device
+    )
+    assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args_list[1].kwargs[
+            "connect_attempts"
+        ]
+        == ROBUST_CONNECT_ATTEMPTS
     )
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.disconnect.assert_awaited_once()
@@ -488,6 +502,7 @@ async def test_learned_stale_cached_route_scans_before_gatt(
         fresh_device,
         sample_virtual_key,
         disconnected_callback=conn._on_disconnected,
+        connect_attempts=ROBUST_CONNECT_ATTEMPTS,
     )
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.lock.assert_awaited_once()
@@ -625,6 +640,7 @@ async def test_cold_idle_uses_connectable_scanner_path_without_aggregate_history
         mock_ble_device,
         sample_virtual_key,
         disconnected_callback=conn._on_disconnected,
+        connect_attempts=SPECULATIVE_CACHED_CONNECT_ATTEMPTS,
     )
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.unlock.assert_awaited_once()
