@@ -73,6 +73,7 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         self._connections = connections
         self._state_attribution: dict[str, StateAttribution] = {}
         self._advertisement_hints: dict[str, LockState] = {}
+        self._new_records_hints: dict[str, bool] = {}
         self._active_scan_requested: set[str] = set()
         self._log_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -104,14 +105,19 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         """
         LOGGER.debug(
             "Advertisement hint for %s "
-            "(source=advertisement, hint=%s, battery=%d, RSSI=%s)",
+            "(source=advertisement, hint=%s, new_records=%s, "
+            "setting_mode=%s, battery=%d, RSSI=%s)",
             mac,
             advertisement.lock_state.name,
+            advertisement.has_new_records,
+            advertisement.is_setting_mode,
             advertisement.battery,
             rssi if rssi is not None else "unknown",
         )
         previous_hint = self._advertisement_hints.get(mac)
+        previous_new_records = self._new_records_hints.get(mac)
         self._advertisement_hints[mac] = advertisement.lock_state
+        self._new_records_hints[mac] = advertisement.has_new_records
         current = (self.data or {}).get(mac, {})
         snapshot: TtlockBleLockState = {
             "locked": current.get("locked"),
@@ -119,13 +125,20 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         }
         self.data = {**(self.data or {}), mac: snapshot}
         self.async_update_listeners()
-        if previous_hint is not None and previous_hint != advertisement.lock_state:
+        state_hint_changed = (
+            previous_hint is not None and previous_hint != advertisement.lock_state
+        )
+        new_records_appeared = (
+            advertisement.has_new_records and previous_new_records is not True
+        )
+        if state_hint_changed or new_records_appeared:
             LOGGER.debug(
-                "Advertisement hint changed for %s (%s -> %s); requesting "
-                "authoritative query",
+                "Advertisement activity for %s "
+                "(state_hint_changed=%s, new_records_appeared=%s); requesting "
+                "authoritative state and operation-log synchronization",
                 mac,
-                previous_hint.name,
-                advertisement.lock_state.name,
+                state_hint_changed,
+                new_records_appeared,
             )
             self.async_request_active_state_refresh(mac)
             self.hass.async_create_task(self.async_request_refresh())

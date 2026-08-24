@@ -174,7 +174,13 @@ async def test_coordinator_polls_every_connection_once(
         conn.async_query_state.assert_awaited_once()
 
 
-def _advertisement(*, unlocked: bool, battery: int = 66):
+def _advertisement(
+    *,
+    unlocked: bool,
+    battery: int = 66,
+    has_new_records: bool = False,
+    is_setting_mode: bool = False,
+):
     from ttlock_ble import LockAdvertisement, LockState
 
     return LockAdvertisement(
@@ -182,8 +188,8 @@ def _advertisement(*, unlocked: bool, battery: int = 66):
         protocol_version=3,
         scene=2,
         lock_state=LockState.UNLOCKED if unlocked else LockState.LOCKED,
-        has_new_records=False,
-        is_setting_mode=False,
+        has_new_records=has_new_records,
+        is_setting_mode=is_setting_mode,
         battery=battery,
         lock_mac="AA:BB:CC:DD:EE:FF",
     )
@@ -231,6 +237,67 @@ async def test_changed_advertisement_hint_requests_active_authoritative_query(
 
     conn.async_query_state.assert_awaited_once_with(active_scan=True)
     assert coordinator.data[mac]["locked"] is True
+
+
+async def test_new_records_hint_requests_one_active_authoritative_query(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A rising activity hint requests reconciliation but is not itself proof."""
+    mac = sample_virtual_key.lockMac
+    conn = _mock_connection(query_return=(1, 65))
+    coordinator = _coordinator(hass, {mac: conn})
+    coordinator.async_set_updated_data({mac: {"locked": True, "battery_level": 70}})
+    coordinator.async_request_refresh = AsyncMock(return_value=None)
+
+    advertisement = _advertisement(
+        unlocked=False,
+        battery=69,
+        has_new_records=True,
+    )
+    coordinator.async_apply_advertisement(mac, advertisement, rssi=-83)
+    coordinator.async_apply_advertisement(mac, advertisement, rssi=-82)
+    await coordinator._async_update_data()
+
+    coordinator.async_request_refresh.assert_awaited_once()
+    conn.async_query_state.assert_awaited_once_with(active_scan=True)
+    assert coordinator.data[mac]["locked"] is True
+
+
+async def test_advertisement_debug_logging_is_safe_and_complete(
+    hass,
+    sample_virtual_key,
+    caplog,
+) -> None:
+    """Decoded hints expose only safe activity, battery, and route diagnostics."""
+    import logging
+
+    mac = sample_virtual_key.lockMac
+    coordinator = _coordinator(hass, {mac: _mock_connection()})
+    coordinator.async_request_refresh = AsyncMock(return_value=None)
+    with caplog.at_level(logging.DEBUG, logger="custom_components.ttlock_ble"):
+        coordinator.async_apply_advertisement(
+            mac,
+            _advertisement(
+                unlocked=True,
+                battery=98,
+                has_new_records=True,
+                is_setting_mode=True,
+            ),
+            rssi=-82,
+        )
+
+    assert "hint=UNLOCKED" in caplog.text
+    assert "new_records=True" in caplog.text
+    assert "setting_mode=True" in caplog.text
+    assert "battery=98" in caplog.text
+    assert "RSSI=-82" in caplog.text
+    for secret in (
+        sample_virtual_key.aesKeyStr,
+        sample_virtual_key.unlockKey,
+        sample_virtual_key.adminPs,
+    ):
+        assert secret not in caplog.text
 
 
 async def test_apply_advertisement_keeps_the_other_locks(hass) -> None:
