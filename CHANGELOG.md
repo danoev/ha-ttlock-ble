@@ -3,7 +3,7 @@
 ## 3.5.1 hardware-validation development series
 
 This fork-only prerelease series preserves every published tag. **RC1 through
-RC8 are superseded for testing; use RC9.** They remain available solely as
+RC9 are superseded for new testing; use RC10.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease
@@ -34,6 +34,14 @@ reproducible development artefacts and their tag history has not been rewritten.
   fallback. It clears exact-address dedup history before the bounded wait,
   accepts only device-cadence-bounded recent callbacks, and scans before GATT
   when learned timing proves aggregate connectable history stale.
+- **RC10** publishes authoritative state before supplementary log retrieval,
+  preserves last-known state/battery across a failed poll, reacts to decoded
+  state/new-record advertisement hints, persists a conservative bounded log
+  replay journal, and makes five-minute reconnect maintenance opt-in. A cached
+  route receives one speculative connector attempt before RC9's single fresh
+  fallback; the fresh route retains the robust three-attempt SDK policy.
+  Operation events gain safe method attribution, while the SDK's overloaded
+  credential field is no longer exported to Recorder.
 
 ## [3.5.0](https://github.com/roquerodrigo/ha-ttlock-ble/compare/v3.4.0...v3.5.0) (2026-08-07)
 
