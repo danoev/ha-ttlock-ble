@@ -20,6 +20,7 @@ from ttlock_ble import VirtualKey
 from .advertisement import TtlockBleAdvertisementTracker
 from .connection import TtlockBleConnection
 from .const import (
+    CONF_BACKGROUND_MAINTENANCE,
     CONF_PERMANENT_CONNECTION,
     CONF_RECONNECT_INTERVAL,
     DEFAULT_RECONNECT_INTERVAL_SECONDS,
@@ -114,6 +115,12 @@ async def async_setup_entry(
     virtual_keys = [VirtualKey.from_dict(dict(k)) for k in stored_keys]
 
     permanent_connection = bool(entry.options.get(CONF_PERMANENT_CONNECTION, False))
+    background_maintenance = permanent_connection or bool(
+        entry.options.get(
+            CONF_BACKGROUND_MAINTENANCE,
+            CONF_RECONNECT_INTERVAL in entry.options,
+        ),
+    )
     reconnect_cooldown_seconds: float = (
         0.0
         if permanent_connection
@@ -133,7 +140,7 @@ async def async_setup_entry(
         for key in virtual_keys
     }
     for connection in connections.values():
-        await connection.async_start()
+        await connection.async_start(maintain=background_maintenance)
 
     scan_interval_seconds: int = int(
         entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_SECONDS),

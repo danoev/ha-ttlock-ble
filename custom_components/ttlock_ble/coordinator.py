@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 LOCK_STATE_LOCKED = 0
 LOCK_STATE_UNLOCKED = 1
+BOOTSTRAP_RETRY_DELAYS_SECONDS = (60.0, 120.0, 300.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,7 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         self._new_records_hints: dict[str, bool] = {}
         self._active_scan_requested: set[str] = set()
         self._log_tasks: dict[str, asyncio.Task[None]] = {}
+        self._bootstrap_retry_tasks: dict[str, asyncio.Task[None]] = {}
 
     @property
     def connections(self) -> dict[str, TtlockBleConnection]:
@@ -195,9 +197,11 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
             if isinstance(result, BaseException):
                 LOGGER.warning("Failed to poll %s: %s", mac, result)
                 state.setdefault(mac, {"locked": None, "battery_level": None})
+                self._async_schedule_bootstrap_retry(mac)
                 continue
             if result is None:
                 state.setdefault(mac, {"locked": None, "battery_level": None})
+                self._async_schedule_bootstrap_retry(mac)
                 continue
             current = state.get(mac, {})
             state[mac] = {
@@ -220,6 +224,44 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
                     connection,
                 )
         return state
+
+    @callback
+    def _async_schedule_bootstrap_retry(self, mac: str) -> None:
+        """Retry an as-yet-unknown lock without running a keep-warm loop."""
+        if self.async_has_state(mac):
+            return
+        current = self._bootstrap_retry_tasks.get(mac)
+        if current is not None and not current.done():
+            return
+        task = self.hass.async_create_background_task(
+            self._async_retry_unknown_state(mac),
+            name=f"{DOMAIN}.bootstrap_retry.{mac}",
+        )
+        self._bootstrap_retry_tasks[mac] = task
+
+        def _remove_bootstrap_task(_completed: asyncio.Task[None]) -> None:
+            self._bootstrap_retry_tasks.pop(mac, None)
+
+        task.add_done_callback(_remove_bootstrap_task)
+
+    async def _async_retry_unknown_state(self, mac: str) -> None:
+        """Use bounded HA-managed active acquisitions until state is known."""
+        attempt = 0
+        while not self.async_has_state(mac):
+            delay = BOOTSTRAP_RETRY_DELAYS_SECONDS[
+                min(attempt, len(BOOTSTRAP_RETRY_DELAYS_SECONDS) - 1)
+            ]
+            LOGGER.debug(
+                "Lock %s has no authoritative state; retrying bootstrap in %.0fs",
+                mac,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            if self.async_has_state(mac):
+                return
+            self.async_request_active_state_refresh(mac)
+            await self.async_request_refresh()
+            attempt += 1
 
     async def _async_poll(
         self,
@@ -279,8 +321,12 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
 
     async def async_shutdown(self) -> None:
         """Cancel supplementary work before the coordinator is discarded."""
-        tasks = list(self._log_tasks.values())
+        tasks = [
+            *self._log_tasks.values(),
+            *self._bootstrap_retry_tasks.values(),
+        ]
         self._log_tasks.clear()
+        self._bootstrap_retry_tasks.clear()
         for task in tasks:
             task.cancel()
         if tasks:

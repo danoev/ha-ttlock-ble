@@ -143,6 +143,34 @@ async def test_failed_poll_preserves_last_authoritative_state_and_battery(
     conn.async_query_state.assert_awaited_once_with(active_scan=False)
 
 
+async def test_unknown_state_retries_bootstrap_with_active_acquisition(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """Never-authoritative state retries sooner than the hourly poll."""
+    from unittest.mock import patch
+
+    mac = sample_virtual_key.lockMac
+    conn = _mock_connection(query_return=None)
+    coordinator = _coordinator(hass, {mac: conn})
+    coordinator.async_request_refresh = AsyncMock(return_value=None)
+
+    with patch(
+        "custom_components.ttlock_ble.coordinator."
+        "BOOTSTRAP_RETRY_DELAYS_SECONDS",
+        (0.001,),
+    ):
+        await coordinator._async_update_data()
+        for _ in range(20):
+            await asyncio.sleep(0.001)
+            if coordinator.async_request_refresh.await_count:
+                break
+        await coordinator.async_shutdown()
+
+    coordinator.async_request_refresh.assert_awaited()
+    assert mac in coordinator._active_scan_requested
+
+
 async def test_known_state_routine_poll_does_not_request_active_scan(
     hass,
     sample_virtual_key,

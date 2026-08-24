@@ -100,11 +100,13 @@
         "data": {
           "scan_interval": "Intervalo de polling (segundos)",
           "reconnect_interval": "Intervalo de reconexão (segundos)",
+          "background_maintenance": "Manutenção de reconexão em segundo plano",
           "permanent_connection": "Conexão permanente"
         },
         "data_description": {
           "scan_interval": "Com que frequência o estado é lido por uma sessão BLE. Anúncios adiam a próxima leitura, então uma fechadura ao alcance raramente é consultada.",
-          "reconnect_interval": "Quanto tempo esperar depois que a fechadura derruba a sessão BLE antes de reconectar.",
+          "reconnect_interval": "Quanto tempo a manutenção opcional espera depois que a fechadura derruba a sessão BLE antes de reconectar.",
+          "background_maintenance": "Reabre sessões BLE ociosas em segundo plano. Desativado por padrão para reduzir o consumo e o tráfego; um estado inicial desconhecido ainda é tentado novamente automaticamente.",
           "permanent_connection": "Reconecta imediatamente após cada queda, mantendo a sessão sempre aberta. Ignora o intervalo de reconexão e aumenta o consumo de bateria da fechadura."
         }
       }

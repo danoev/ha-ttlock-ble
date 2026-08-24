@@ -136,9 +136,9 @@ class TtlockBleConnection:
         """Return the RSSI of the most recently selected HA connection route."""
         return self._last_connection_rssi
 
-    async def async_start(self) -> None:
-        """Begin maintaining the BLE connection in the background."""
-        if self._task is not None:
+    async def async_start(self, *, maintain: bool = True) -> None:
+        """Start optional reconnect maintenance for this lock."""
+        if not maintain or self._task is not None:
             return
         self._closing = False
         self._closing_event.clear()

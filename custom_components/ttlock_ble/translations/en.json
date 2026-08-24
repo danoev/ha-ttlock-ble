@@ -100,11 +100,13 @@
         "data": {
           "scan_interval": "Polling interval (seconds)",
           "reconnect_interval": "Reconnection interval (seconds)",
+          "background_maintenance": "Background reconnect maintenance",
           "permanent_connection": "Permanent connection"
         },
         "data_description": {
           "scan_interval": "How often the state is read over a BLE session. Advertisements postpone the next read, so an in-range lock is rarely polled.",
-          "reconnect_interval": "How long to wait after the lock drops the BLE session before reconnecting.",
+          "reconnect_interval": "How long optional background maintenance waits after the lock drops the BLE session before reconnecting.",
+          "background_maintenance": "Keep reopening idle BLE sessions in the background. Off by default to reduce lock battery use and Bluetooth traffic; Unknown startup state still retries automatically.",
           "permanent_connection": "Reconnect immediately after every drop, keeping the session always open. Ignores the reconnection interval and increases the lock's battery drain."
         }
       }

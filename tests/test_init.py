@@ -53,7 +53,7 @@ async def test_runtime_data_populated(
 async def test_setup_starts_each_connection(
     hass, setup_integration, mock_ttlock_connection
 ) -> None:
-    mock_ttlock_connection.async_start.assert_awaited()
+    mock_ttlock_connection.async_start.assert_awaited_once_with(maintain=False)
 
 
 async def test_startup_bootstraps_unknown_state_with_active_acquisition(
@@ -219,11 +219,16 @@ async def test_scan_interval_picks_up_options(
 
 
 @pytest.mark.parametrize(
-    ("options", "expected_cooldown"),
+    ("options", "expected_cooldown", "expected_maintenance"),
     [
-        ({}, 300.0),
-        ({"reconnect_interval": 120}, 120.0),
-        ({"reconnect_interval": 120, "permanent_connection": True}, 0.0),
+        ({}, 300.0, False),
+        ({"reconnect_interval": 120}, 120.0, True),
+        (
+            {"reconnect_interval": 120, "background_maintenance": False},
+            120.0,
+            False,
+        ),
+        ({"reconnect_interval": 120, "permanent_connection": True}, 0.0, True),
     ],
 )
 async def test_reconnect_options_reach_the_connections(
@@ -234,6 +239,7 @@ async def test_reconnect_options_reach_the_connections(
     mock_cloud,
     options,
     expected_cooldown,
+    expected_maintenance,
 ) -> None:
     """The configured cooldown is handed to every connection; permanent wins."""
     from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -263,6 +269,9 @@ async def test_reconnect_options_reach_the_connections(
             hass,
             ANY,
             reconnect_cooldown_seconds=expected_cooldown,
+        )
+        instance.async_start.assert_awaited_once_with(
+            maintain=expected_maintenance,
         )
 
 

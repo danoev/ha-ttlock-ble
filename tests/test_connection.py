@@ -1361,6 +1361,22 @@ async def test_async_start_idempotent(
         await conn.async_stop()
 
 
+async def test_async_start_can_leave_default_connection_on_demand(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Normal RC10 mode has no keep-warm reconnect task."""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    await conn.async_start(maintain=False)
+
+    assert conn._task is None
+    mock_ble_resolver.assert_not_called()
+    mock_ttlock_client.connect.assert_not_awaited()
+
+
 async def test_async_stop_without_start_is_safe(hass, sample_virtual_key) -> None:
     conn = TtlockBleConnection(hass, sample_virtual_key)
     await conn.async_stop()
