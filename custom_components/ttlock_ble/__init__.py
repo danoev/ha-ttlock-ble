@@ -30,6 +30,7 @@ from .const import (
 )
 from .coordinator import TtlockBleDataUpdateCoordinator
 from .data import TtlockBleData
+from .log_history import TtlockBleLogHistory
 from .services import async_setup_services
 
 if TYPE_CHECKING:
@@ -113,6 +114,8 @@ async def async_setup_entry(
     _async_prune_stale_devices(hass, entry, config)
     stored_keys: list[TtlockBleStoredKey] = list(config["keys"])
     virtual_keys = [VirtualKey.from_dict(dict(k)) for k in stored_keys]
+    log_history = TtlockBleLogHistory(hass, entry.entry_id)
+    await log_history.async_load()
 
     permanent_connection = bool(entry.options.get(CONF_PERMANENT_CONNECTION, False))
     background_maintenance = permanent_connection or bool(
@@ -136,6 +139,7 @@ async def async_setup_entry(
             hass,
             key,
             reconnect_cooldown_seconds=reconnect_cooldown_seconds,
+            log_history=log_history,
         )
         for key in virtual_keys
     }
@@ -171,6 +175,7 @@ async def async_setup_entry(
     # last-registered-first, so tracking stops before the connections do.
     entry.async_on_unload(_stop_connections)
     entry.async_on_unload(_stop_advertisement_tracking)
+    entry.async_on_unload(log_history.async_save)
 
     # Trigger the first state refresh without awaiting it, so the config entry
     # can finish loading while connections settle. The task is still tracked by

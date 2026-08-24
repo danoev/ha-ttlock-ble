@@ -39,6 +39,7 @@ from ttlock_ble import KeyboardPwdType, LockState, TTLockClient, TTLockError
 
 from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
+from .log_history import TtlockBleLogHistory
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -98,6 +99,7 @@ class TtlockBleConnection:
         hass: HomeAssistant,
         key: VirtualKey,
         reconnect_cooldown_seconds: float = DEFAULT_RECONNECT_INTERVAL_SECONDS,
+        log_history: TtlockBleLogHistory | None = None,
     ) -> None:
         """
         Bind to the HA instance and the credentials for a single lock.
@@ -115,8 +117,7 @@ class TtlockBleConnection:
         self._closing = False
         self._closing_event = asyncio.Event()
         self._disconnected = asyncio.Event()
-        self._seen_records: set[int] = set()
-        self._log_seeded = False
+        self._log_history = log_history or TtlockBleLogHistory(hass)
         self._broadcast_connected = False
         self._reachability_diagnostic: str | None = None
         self._last_connection_rssi: int | None = None
@@ -265,17 +266,10 @@ class TtlockBleConnection:
         """
         Fetch operation records from the lock and dispatch the new ones.
 
-        The first fetch that actually reaches the lock only seeds
-        `_seen_records` and returns nothing. The lock hands back
-        everything unsynced since its last cursor sync, and that set is
-        history — replaying it through the event entity would fire
-        automations for unlocks that happened days ago. `_seen_records`
-        lives in memory, so the seeding pass runs once per HA start,
-        which is exactly when the backlog would otherwise arrive.
-
-        Seeding is tied to a successful fetch, not to an attempt: a lock
-        out of range at startup gets its seeding pass whenever it first
-        answers.
+        Classification uses a bounded persisted identity journal and this
+        config-entry load's wall-clock boundary. That survives record-number
+        wrap and firmware replay while conservatively suppressing entries whose
+        timestamp cannot prove they happened after this load began.
         """
         async with self._lock:
             client = await self._async_ensure_connected_locked(reason="operation log")
@@ -301,29 +295,11 @@ class TtlockBleConnection:
                 )
                 return []
         LOGGER.debug(
-            "get_operation_log for %s: %d entries, seen=%d",
+            "get_operation_log for %s: %d entries",
             self._key.lockMac,
             len(entries),
-            len(self._seen_records),
         )
-        new_entries: list[LogEntry] = []
-        for entry in entries:
-            if entry.record_number not in self._seen_records:
-                self._seen_records.add(entry.record_number)
-                new_entries.append(entry)
-        if not self._log_seeded:
-            LOGGER.debug(
-                "Lock %s: seeded %d existing log records from this page, "
-                "none dispatched (page_full=%s)",
-                self._key.lockMac,
-                len(new_entries),
-                len(entries) >= MAX_LOG_ENTRIES_PER_FETCH,
-            )
-            # A full bounded page is not proof that history is exhausted.
-            # Keep seeding until the first short/empty page so later historical
-            # pages cannot be mistaken for live operations.
-            self._log_seeded = len(entries) < MAX_LOG_ENTRIES_PER_FETCH
-            return []
+        new_entries = self._log_history.classify(self._key.lockMac, entries)
         if new_entries:
             LOGGER.debug(
                 "Lock %s: dispatching %d new log entries",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,10 +23,24 @@ from custom_components.ttlock_ble.connection import (
     log_signal,
 )
 
+OLD_LOG_DATE = dt.datetime(2020, 1, 1)  # noqa: DTZ001 -- lock RTC is naive
+NEW_LOG_DATE = dt.datetime(2099, 1, 1)  # noqa: DTZ001 -- lock RTC is naive
 
-def _log_entry(record_number: int) -> SimpleNamespace:
+
+def _log_entry(
+    record_number: int,
+    *,
+    operate_date: dt.datetime | None = OLD_LOG_DATE,
+) -> SimpleNamespace:
     """Build a minimal LogEntry stand-in keyed by `record_number`."""
-    return SimpleNamespace(record_number=record_number)
+    return SimpleNamespace(
+        record_number=record_number,
+        record_type=1,
+        operate_date=operate_date,
+        uid=None,
+        record_id=None,
+        key_id=None,
+    )
 
 
 def _scanner_device(
@@ -1678,7 +1693,11 @@ async def test_get_operation_log_dispatches_only_new_records(
     assert received == []
 
     # A later fetch returning the same records plus a new one only emits the new.
-    second = [_log_entry(1), _log_entry(2), _log_entry(3)]
+    second = [
+        _log_entry(1),
+        _log_entry(2),
+        _log_entry(3, operate_date=NEW_LOG_DATE),
+    ]
     mock_ttlock_client.get_operation_log = AsyncMock(return_value=second)
     new_entries = await conn.async_get_operation_log()
     await hass.async_block_till_done()
@@ -1705,7 +1724,7 @@ async def test_full_initial_log_pages_are_all_seeded_without_events(
         _log_entry(number) for number in range(1, MAX_LOG_ENTRIES_PER_FETCH + 1)
     ]
     final_history_page = [_log_entry(number) for number in range(26, 31)]
-    live_page = [_log_entry(31)]
+    live_page = [_log_entry(31, operate_date=NEW_LOG_DATE)]
     mock_ttlock_client.get_operation_log = AsyncMock(
         side_effect=[full_page, final_history_page, live_page]
     )
@@ -1717,6 +1736,40 @@ async def test_full_initial_log_pages_are_all_seeded_without_events(
     await hass.async_block_till_done()
 
     assert [entry.record_number for entry in received] == [31]
+
+
+async def test_short_page_then_later_historical_full_page_stays_suppressed(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A misleading short page cannot make later old firmware history live."""
+    from custom_components.ttlock_ble.connection import MAX_LOG_ENTRIES_PER_FETCH
+
+    received: list[object] = []
+    async_dispatcher_connect(
+        hass,
+        log_signal(sample_virtual_key.lockMac),
+        received.append,
+    )
+    first_short = [_log_entry(1), _log_entry(2)]
+    later_history = [
+        _log_entry(number)
+        for number in range(3, MAX_LOG_ENTRIES_PER_FETCH + 3)
+    ]
+    new_record = _log_entry(28, operate_date=NEW_LOG_DATE)
+    mock_ttlock_client.get_operation_log = AsyncMock(
+        side_effect=[first_short, later_history, [new_record]],
+    )
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    assert await conn.async_get_operation_log() == []
+    assert await conn.async_get_operation_log() == []
+    assert await conn.async_get_operation_log() == [new_record]
+    await hass.async_block_till_done()
+
+    assert [entry.record_number for entry in received] == [28]
 
 
 async def test_seeding_waits_for_a_fetch_that_reached_the_lock(
