@@ -41,7 +41,9 @@ reproducible development artefacts and their tag history has not been rewritten.
   route receives one speculative connector attempt before RC9's single fresh
   fallback; the fresh route retains the robust three-attempt SDK policy.
   Operation events gain safe method attribution, while the SDK's overloaded
-  credential field is no longer exported to Recorder.
+  credential field is no longer exported to Recorder. HACS releases use the
+  fork-owned `ttlock_ble.zip` install asset rather than depending on upstream
+  packaging infrastructure.
 
 ## [3.5.0](https://github.com/roquerodrigo/ha-ttlock-ble/compare/v3.4.0...v3.5.0) (2026-08-07)
 

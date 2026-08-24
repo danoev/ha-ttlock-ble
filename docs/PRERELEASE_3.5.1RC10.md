@@ -32,6 +32,22 @@ RC10 pins immutable SDK commit
 change makes connector attempts configurable per client. It does not change
 protocol frames, command retries, acknowledgement handling, or credentials.
 
+## HACS prerelease packaging
+
+The RC10 GitHub prerelease must include `ttlock_ble.zip`. The archive contains
+only the tracked contents of `custom_components/ttlock_ble/`, with
+`manifest.json` at the archive root, matching the fork's `hacs.json` release
+asset declaration. The fork owns the packaging workflow and it uses only the
+repository-scoped GitHub token; it does not call an upstream reusable workflow
+or use an upstream secret.
+
+HACS discovers versions from published GitHub Releases, not tags alone. Enable
+the tracked repository's prerelease switch before selecting RC10. If HACS still
+identifies the repository as `roquerodrigo/ha-ttlock-ble`, remove that upstream
+custom-repository registration and add
+`https://github.com/danoev/ha-ttlock-ble` as type **Integration**. This does not
+require removing the existing Home Assistant TTLock config entry.
+
 ## Preserved safety invariants
 
 - Lock/unlock control payloads remain single-send.

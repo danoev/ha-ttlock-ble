@@ -71,7 +71,7 @@ The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `p
 
 ## Installation
 
-1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration).
+1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled; select `v3.5.1rc10` from the version list. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
 2. Restart Home Assistant.
 3. Settings → Devices & Services → Add Integration → **TTLock BLE**.
 4. Choose how the keys are obtained:
