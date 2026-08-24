@@ -33,8 +33,7 @@ async def test_short_then_full_historical_pages_are_suppressed(hass) -> None:
     history._startup_cutoff = CUTOFF
     short = [_entry(1, CUTOFF - dt.timedelta(days=2))]
     later_full = [
-        _entry(number, CUTOFF - dt.timedelta(days=1))
-        for number in range(2, 27)
+        _entry(number, CUTOFF - dt.timedelta(days=1)) for number in range(2, 27)
     ]
 
     assert history.classify(MAC, short) == []

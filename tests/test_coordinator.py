@@ -156,8 +156,7 @@ async def test_unknown_state_retries_bootstrap_with_active_acquisition(
     coordinator.async_request_refresh = AsyncMock(return_value=None)
 
     with patch(
-        "custom_components.ttlock_ble.coordinator."
-        "BOOTSTRAP_RETRY_DELAYS_SECONDS",
+        "custom_components.ttlock_ble.coordinator.BOOTSTRAP_RETRY_DELAYS_SECONDS",
         (0.001,),
     ):
         await coordinator._async_update_data()

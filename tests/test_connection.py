@@ -1771,8 +1771,7 @@ async def test_short_page_then_later_historical_full_page_stays_suppressed(
     )
     first_short = [_log_entry(1), _log_entry(2)]
     later_history = [
-        _log_entry(number)
-        for number in range(3, MAX_LOG_ENTRIES_PER_FETCH + 3)
+        _log_entry(number) for number in range(3, MAX_LOG_ENTRIES_PER_FETCH + 3)
     ]
     new_record = _log_entry(28, operate_date=NEW_LOG_DATE)
     mock_ttlock_client.get_operation_log = AsyncMock(
