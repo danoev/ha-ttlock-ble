@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,7 +47,46 @@ async def test_poll_keeps_state_when_log_read_fails(hass) -> None:
     conn.async_get_operation_log = AsyncMock(side_effect=ValueError("garbled frame"))
     coordinator = _coordinator(hass, {"AA:BB:CC:DD:EE:FF": conn})
     data = await coordinator._async_update_data()
+    await hass.async_block_till_done()
     assert data["AA:BB:CC:DD:EE:FF"] == {"locked": True, "battery_level": 80}
+
+
+async def test_state_publishes_before_slow_operation_log_completes(hass) -> None:
+    """Supplementary history cannot hold an authoritative state hostage."""
+    mac = "AA:BB:CC:DD:EE:FF"
+    release_log = asyncio.Event()
+    log_started = asyncio.Event()
+    conn = _mock_connection(query_return=(1, 79))
+
+    async def _slow_log() -> list:
+        log_started.set()
+        await release_log.wait()
+        return []
+
+    conn.async_get_operation_log = AsyncMock(side_effect=_slow_log)
+    coordinator = _coordinator(hass, {mac: conn})
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await asyncio.wait_for(log_started.wait(), timeout=1)
+
+    assert coordinator.data[mac] == {"locked": False, "battery_level": 79}
+
+    release_log.set()
+    await refresh
+    await hass.async_block_till_done()
+
+
+async def test_log_timeout_does_not_mark_coordinator_update_failed(hass) -> None:
+    """A timeout in history leaves the successful state update intact."""
+    mac = "AA:BB:CC:DD:EE:FF"
+    conn = _mock_connection(query_return=(0, 78))
+    conn.async_get_operation_log = AsyncMock(side_effect=TimeoutError)
+    coordinator = _coordinator(hass, {mac: conn})
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data[mac] == {"locked": True, "battery_level": 78}
 
 
 async def test_coordinator_exposes_connections(hass) -> None:
@@ -72,7 +112,7 @@ async def test_coordinator_polls_state_unlocked(hass, sample_virtual_key) -> Non
     assert data[sample_virtual_key.lockMac]["locked"] is False
 
 
-async def test_coordinator_blanks_the_readings_when_a_query_returns_none(
+async def test_initial_failed_query_leaves_readings_unknown(
     hass,
     sample_virtual_key,
 ) -> None:
@@ -83,6 +123,24 @@ async def test_coordinator_blanks_the_readings_when_a_query_returns_none(
     assert state["locked"] is None
     assert state["battery_level"] is None
     conn.async_query_state.assert_awaited_once_with(active_scan=True)
+
+
+async def test_failed_poll_preserves_last_authoritative_state_and_battery(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A transient BLE miss does not erase the last confirmed snapshot."""
+    mac = sample_virtual_key.lockMac
+    conn = _mock_connection(query_return=None)
+    coordinator = _coordinator(hass, {mac: conn})
+    coordinator.async_set_updated_data(
+        {mac: {"locked": True, "battery_level": 76}},
+    )
+
+    data = await coordinator._async_update_data()
+
+    assert data[mac] == {"locked": True, "battery_level": 76}
+    conn.async_query_state.assert_awaited_once_with(active_scan=False)
 
 
 async def test_known_state_routine_poll_does_not_request_active_scan(

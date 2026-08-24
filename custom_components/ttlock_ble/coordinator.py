@@ -74,6 +74,7 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         self._state_attribution: dict[str, StateAttribution] = {}
         self._advertisement_hints: dict[str, LockState] = {}
         self._active_scan_requested: set[str] = set()
+        self._log_tasks: dict[str, asyncio.Task[None]] = {}
 
     @property
     def connections(self) -> dict[str, TtlockBleConnection]:
@@ -176,20 +177,35 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
             for mac, connection in self._connections.items()
         }
         results = await asyncio.gather(*poll_tasks.values(), return_exceptions=True)
-        state: TtlockBleCoordinatorData = {}
+        state: TtlockBleCoordinatorData = dict(self.data or {})
         for mac, result in zip(poll_tasks, results, strict=True):
             if isinstance(result, BaseException):
                 LOGGER.warning("Failed to poll %s: %s", mac, result)
-                state[mac] = {"locked": None, "battery_level": None}
-            else:
-                state[mac] = result
-                if result.get("locked") is not None:
-                    connection = self._connections[mac]
-                    self._state_attribution[mac] = StateAttribution(
-                        source="query",
-                        observed_at=monotonic(),
-                        rssi=connection.last_connection_rssi,
-                    )
+                state.setdefault(mac, {"locked": None, "battery_level": None})
+                continue
+            if result is None:
+                state.setdefault(mac, {"locked": None, "battery_level": None})
+                continue
+            current = state.get(mac, {})
+            state[mac] = {
+                "locked": result.get("locked")
+                if result.get("locked") is not None
+                else current.get("locked"),
+                "battery_level": result.get("battery_level")
+                if result.get("battery_level") is not None
+                else current.get("battery_level"),
+            }
+            if result.get("locked") is not None:
+                connection = self._connections[mac]
+                self._state_attribution[mac] = StateAttribution(
+                    source="query",
+                    observed_at=monotonic(),
+                    rssi=connection.last_connection_rssi,
+                )
+                self.hass.loop.call_soon(
+                    self._async_schedule_operation_log,
+                    connection,
+                )
         return state
 
     async def _async_poll(
@@ -197,12 +213,43 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         connection: TtlockBleConnection,
         *,
         active_scan: bool,
-    ) -> TtlockBleLockState:
+    ) -> TtlockBleLockState | None:
         """Query one lock through its persistent connection."""
         result = await connection.async_query_state(active_scan=active_scan)
         if result is None:
-            return {"locked": None, "battery_level": None}
+            return None
         raw_state, battery = result
+        return {
+            "locked": _parse_lock_state(raw_state),
+            "battery_level": battery,
+        }
+
+    @callback
+    def _async_schedule_operation_log(
+        self,
+        connection: TtlockBleConnection,
+    ) -> None:
+        """Fetch supplementary history without delaying primary state publication."""
+        mac = connection.key.lockMac
+        current = self._log_tasks.get(mac)
+        if current is not None and not current.done():
+            return
+        task = self.hass.async_create_background_task(
+            self._async_sync_operation_log(connection),
+            name=f"{DOMAIN}.operation_log.{mac}",
+        )
+        self._log_tasks[mac] = task
+
+        def _remove_log_task(_completed: asyncio.Task[None]) -> None:
+            self._log_tasks.pop(mac, None)
+
+        task.add_done_callback(_remove_log_task)
+
+    async def _async_sync_operation_log(
+        self,
+        connection: TtlockBleConnection,
+    ) -> None:
+        """Synchronize history while keeping failures separate from lock state."""
         try:
             await connection.async_get_operation_log()
         except Exception:  # noqa: BLE001
@@ -216,10 +263,16 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
                 connection.key.lockMac,
                 exc_info=True,
             )
-        return {
-            "locked": _parse_lock_state(raw_state),
-            "battery_level": battery,
-        }
+
+    async def async_shutdown(self) -> None:
+        """Cancel supplementary work before the coordinator is discarded."""
+        tasks = list(self._log_tasks.values())
+        self._log_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await super().async_shutdown()
 
 
 def _parse_lock_state(raw: int | None) -> bool | None:
