@@ -119,13 +119,12 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
     @callback
     def _on_lock_event(self, event: LockEvent) -> None:
         """
-        Apply lock state directly from a push notification.
+        Treat a push notification as an activity hint and query fresh state.
 
-        The 3-byte heartbeat push (cmd_echo=0x14) already carries the
-        decoded `lock_state` (0 = locked, 1 = unlocked) — adopt it
-        without a follow-up query. The 15-byte log-entry variant has
-        no `lock_state`; for those (and any unknown opcode that might
-        still signify a change) we fall back to a forced re-query.
+        The decoded state on the 3-byte heartbeat is not authoritative bolt
+        position on all supported lock firmware. The 15-byte log-entry variant
+        has no state at all. Both forms therefore request a connected state
+        query instead of writing the push hint directly to Home Assistant.
         """
         LOGGER.debug(
             "Event-driven update for %s (cmd_echo=0x%02x status=%d lock_state=%s)",
