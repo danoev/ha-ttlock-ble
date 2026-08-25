@@ -407,3 +407,28 @@ async def test_poll_that_raises_blanks_only_that_lock(hass, sample_virtual_key) 
     data = await coordinator._async_update_data()
     assert data[sample_virtual_key.lockMac] == {"locked": None, "battery_level": None}
     assert data[other]["locked"] is False
+
+
+async def test_poll_exception_preserves_last_authoritative_state(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A failed query must not replace a previously authoritative state."""
+    conn = _mock_connection()
+    coordinator = _coordinator(hass, {sample_virtual_key.lockMac: conn})
+    coordinator.async_apply_authoritative_state(
+        sample_virtual_key.lockMac,
+        locked=False,
+        battery_level=76,
+        source="query",
+        rssi=-82,
+    )
+    conn.async_query_state = AsyncMock(side_effect=RuntimeError("adapter gone"))
+
+    data = await coordinator._async_update_data()
+
+    assert data[sample_virtual_key.lockMac] == {
+        "locked": False,
+        "battery_level": 76,
+    }
+    assert coordinator.state_attribution(sample_virtual_key.lockMac).source == "query"

@@ -144,6 +144,39 @@ async def test_missing_device_logs_reachability_diagnostic(
         assert credential not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "error", [RuntimeError("adapter gone"), ValueError("bad frame")]
+)
+async def test_query_state_contains_unwrapped_sdk_errors(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    error,
+) -> None:
+    """Transport/decrypt errors obey the state-or-None query contract."""
+    mock_ttlock_client.query_state.side_effect = error
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    assert await conn.async_query_state() is None
+    assert conn.is_connected is False
+    mock_ttlock_client.disconnect.assert_awaited_once()
+
+
+async def test_query_state_lets_cancellation_through(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Unload cancellation must not be converted into an ordinary failed read."""
+    mock_ttlock_client.query_state.side_effect = asyncio.CancelledError
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    with pytest.raises(asyncio.CancelledError):
+        await conn.async_query_state()
+
+
 async def test_missing_device_propagates_reachability_diagnostic_to_command(
     hass,
     sample_virtual_key,
