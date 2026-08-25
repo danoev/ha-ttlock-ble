@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from bleak.exc import BleakError
 from homeassistant.components.bluetooth import (
     MONOTONIC_TIME,
     BluetoothReachabilityIntent,
@@ -145,7 +146,12 @@ async def test_missing_device_logs_reachability_diagnostic(
 
 
 @pytest.mark.parametrize(
-    "error", [RuntimeError("adapter gone"), ValueError("bad frame")]
+    "error",
+    [
+        BleakError("adapter gone"),
+        RuntimeError("transport failed"),
+        ValueError("bad frame"),
+    ],
 )
 async def test_query_state_contains_unwrapped_sdk_errors(
     hass,
@@ -184,7 +190,7 @@ async def test_query_state_contains_unwrapped_connection_setup_error(
     mock_ttlock_client,
 ) -> None:
     """A raw notification/GATT setup failure cannot escape a state query."""
-    mock_ttlock_client.connect.side_effect = RuntimeError("adapter gone")
+    mock_ttlock_client.connect.side_effect = BleakError("adapter gone")
     conn = TtlockBleConnection(hass, sample_virtual_key)
 
     assert await conn.async_query_state() is None
