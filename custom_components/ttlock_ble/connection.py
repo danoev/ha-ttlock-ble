@@ -190,7 +190,11 @@ class TtlockBleConnection:
                 return None
             try:
                 return await client.query_state()
-            except TTLockError as exc:
+            except Exception as exc:  # noqa: BLE001
+                # The SDK's transport/decrypt path can also surface unwrapped
+                # BleakError, RuntimeError, or ValueError.  Keep the public
+                # query contract (state or None) consistent for every caller;
+                # asyncio cancellation inherits BaseException and still exits.
                 LOGGER.warning(
                     "query_state failed for %s: %s",
                     self._key.lockMac,
