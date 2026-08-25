@@ -177,6 +177,20 @@ async def test_query_state_lets_cancellation_through(
         await conn.async_query_state()
 
 
+async def test_query_state_contains_unwrapped_connection_setup_error(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A raw notification/GATT setup failure cannot escape a state query."""
+    mock_ttlock_client.connect.side_effect = RuntimeError("adapter gone")
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    assert await conn.async_query_state() is None
+    mock_ttlock_client.disconnect.assert_awaited_once()
+
+
 async def test_missing_device_propagates_reachability_diagnostic_to_command(
     hass,
     sample_virtual_key,
