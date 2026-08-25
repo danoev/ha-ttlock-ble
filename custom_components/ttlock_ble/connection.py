@@ -592,6 +592,12 @@ class TtlockBleConnection:
                     reason=reason,
                 )
                 continue
+            except Exception as exc:  # noqa: BLE001
+                # The SDK wraps connector failures, but later notification/GATT
+                # setup can still surface a raw exception. Contain and clean it
+                # without adding retries or changing the acquisition policy.
+                await self._async_discard_failed_setup(client, reason, exc)
+                break
             if self._closing_event.is_set():
                 with contextlib.suppress(Exception):
                     await client.disconnect()
@@ -618,6 +624,22 @@ class TtlockBleConnection:
         if not self._closing_event.is_set():
             self._record_reachability_diagnostic(reason, started)
         return None
+
+    async def _async_discard_failed_setup(
+        self,
+        client: TTLockClient,
+        reason: str,
+        exc: Exception,
+    ) -> None:
+        """Clean up an unwrapped SDK setup failure without changing retries."""
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+        LOGGER.warning(
+            "BLE setup failed for %s (reason=%s): %s",
+            self._key.lockMac,
+            reason,
+            exc,
+        )
 
     async def _async_resolve_initial_candidate_locked(
         self,
