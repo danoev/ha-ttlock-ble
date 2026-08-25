@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
+from enum import Enum
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -57,6 +58,13 @@ RECONNECT_MAX_BACKOFF = 300.0
 EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS = 25
 SPECULATIVE_CACHED_CONNECT_ATTEMPTS = 1
 ROBUST_CONNECT_ATTEMPTS = 3
+CACHED_CONNECT_TIMEOUT_SECONDS = 16.0
+FRESH_CONNECT_TIMEOUT_SECONDS = 42.0
+EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS = 60.0
+MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS = 60.0
+ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS = 16.0
+UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS = 48.0
+AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS = 48.0
 
 # The lock answers the operation log one record per BLE frame, each with
 # its own timeout, and the SDK holds its command lock for the whole
@@ -76,6 +84,47 @@ class _ConnectionCandidate:
     source: str
     rssi: int | None
     advertisement_time: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupResult:
+    """Outcome of fully awaiting one candidate's explicit teardown."""
+
+    elapsed: float
+    succeeded: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectTimeoutResult:
+    """Outcome from a connection phase that reached its cancellation deadline."""
+
+    acquisition_elapsed: float
+    cleanup: _CleanupResult
+
+
+class _AcquisitionIntent(Enum):
+    """Semantic reason for acquiring a BLE connection."""
+
+    EXPLICIT_CONTROL = "explicit_control"
+    ROUTINE_QUERY = "routine_query"
+    UNKNOWN_BOOTSTRAP = "unknown_bootstrap"
+    MANAGEMENT = "management"
+    AMBIGUOUS_RECONCILIATION = "ambiguous_reconciliation"
+    OPERATION_LOG = "operation_log"
+    BACKGROUND_MAINTENANCE = "background_maintenance"
+
+
+def _acquisition_budget(intent: _AcquisitionIntent) -> float:
+    """Return the validation budget for one semantic acquisition intent."""
+    if intent is _AcquisitionIntent.EXPLICIT_CONTROL:
+        return EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS
+    if intent is _AcquisitionIntent.MANAGEMENT:
+        return MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS
+    if intent is _AcquisitionIntent.UNKNOWN_BOOTSTRAP:
+        return UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS
+    if intent is _AcquisitionIntent.AMBIGUOUS_RECONCILIATION:
+        return AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS
+    return ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS
 
 
 def event_signal(mac: str) -> str:
@@ -182,6 +231,11 @@ class TtlockBleConnection:
         async with self._lock:
             client = await self._async_ensure_connected_locked(
                 active_scan=active_scan,
+                intent=(
+                    _AcquisitionIntent.UNKNOWN_BOOTSTRAP
+                    if active_scan
+                    else _AcquisitionIntent.ROUTINE_QUERY
+                ),
                 reason="authoritative state bootstrap"
                 if active_scan
                 else "state query",
@@ -278,7 +332,10 @@ class TtlockBleConnection:
         timestamp cannot prove they happened after this load began.
         """
         async with self._lock:
-            client = await self._async_ensure_connected_locked(reason="operation log")
+            client = await self._async_ensure_connected_locked(
+                intent=_AcquisitionIntent.OPERATION_LOG,
+                reason="operation log",
+            )
             if client is None:
                 LOGGER.warning("get_operation_log: no client for %s", self._key.lockMac)
                 return []
@@ -342,6 +399,7 @@ class TtlockBleConnection:
         async with self._lock:
             client = await self._async_ensure_connected_locked(
                 active_scan=True,
+                intent=_AcquisitionIntent.EXPLICIT_CONTROL,
                 reason=f"explicit {action}",
             )
             if client is None:
@@ -394,6 +452,7 @@ class TtlockBleConnection:
             await self._async_disconnect_locked()
             replacement = await self._async_ensure_connected_locked(
                 active_scan=True,
+                intent=_AcquisitionIntent.AMBIGUOUS_RECONCILIATION,
                 reason=f"reconcile ambiguous {action}",
             )
             if replacement is None:
@@ -446,6 +505,7 @@ class TtlockBleConnection:
         async with self._lock:
             client = await self._async_ensure_connected_locked(
                 active_scan=active_scan,
+                intent=_AcquisitionIntent.MANAGEMENT,
                 reason=f"management {action}",
             )
             if client is None:
@@ -478,6 +538,7 @@ class TtlockBleConnection:
         self,
         *,
         active_scan: bool = False,
+        intent: _AcquisitionIntent,
         reason: str,
     ) -> TTLockClient | None:
         """
@@ -490,12 +551,17 @@ class TtlockBleConnection:
         block the connection the reloaded entry is trying to make.
         """
         started = monotonic()
+        budget = _acquisition_budget(intent)
+        deadline = started + budget
         self._reachability_diagnostic = None
         LOGGER.debug(
             "Connection acquisition started for %s "
-            "(reason=%s, existing_client_connected=%s, active_scan=%s)",
+            "(reason=%s, intent=%s, total_budget=%.1fs, "
+            "existing_client_connected=%s, active_scan=%s)",
             self._key.lockMac,
             reason,
+            intent.value,
+            budget,
             self.is_connected,
             active_scan,
         )
@@ -520,15 +586,36 @@ class TtlockBleConnection:
             active_acquisition_attempted,
         ) = await self._async_resolve_initial_candidate_locked(
             active_scan=active_scan,
+            deadline=deadline,
             reason=reason,
         )
         while candidate is not None and not self._closing_event.is_set():
-            speculative_cached_route = active_scan and not active_acquisition_attempted
+            cached_route = not active_acquisition_attempted
+            speculative_cached_route = active_scan and cached_route
             connect_attempts = (
                 SPECULATIVE_CACHED_CONNECT_ATTEMPTS
                 if speculative_cached_route
                 else ROBUST_CONNECT_ATTEMPTS
             )
+            phase_cap = (
+                CACHED_CONNECT_TIMEOUT_SECONDS
+                if cached_route
+                else FRESH_CONNECT_TIMEOUT_SECONDS
+            )
+            remaining = self._remaining_acquisition_time(deadline)
+            phase_timeout = min(phase_cap, remaining)
+            if phase_timeout <= 0:
+                LOGGER.debug(
+                    "Connection acquisition deadline exhausted for %s before GATT "
+                    "(reason=%s, intent=%s, total_budget=%.1fs, "
+                    "total_elapsed=%.1fs)",
+                    self._key.lockMac,
+                    reason,
+                    intent.value,
+                    budget,
+                    monotonic() - started,
+                )
+                break
             client = TtlockBleClient.from_ble_device(
                 candidate.device,
                 self._key,
@@ -545,7 +632,9 @@ class TtlockBleConnection:
                 "Opening BLE connection for %s "
                 "(reason=%s, resolution=%s, source=%s, RSSI=%s, age=%s, "
                 "candidate_elapsed=%.1fs, speculative_cached_route=%s, "
-                "connect_attempts=%d; GATT retries delegated to ttlock-ble)",
+                "connect_attempts=%d, intent=%s, phase_cap=%.1fs, "
+                "phase_timeout=%.1fs, remaining_intent_time=%.1fs; "
+                "GATT retries delegated to ttlock-ble)",
                 self._key.lockMac,
                 reason,
                 candidate.resolution,
@@ -555,75 +644,208 @@ class TtlockBleConnection:
                 connect_started - started,
                 speculative_cached_route,
                 connect_attempts,
+                intent.value,
+                phase_cap,
+                phase_timeout,
+                remaining,
             )
             try:
-                await client.connect()
-            except asyncio.CancelledError:
-                with contextlib.suppress(Exception):
-                    await client.disconnect()
-                raise
+                timeout_result = await self._async_connect_before_deadline(
+                    client,
+                    phase_timeout=phase_timeout,
+                    intent=intent,
+                    reason=reason,
+                )
             except TTLockError as exc:
-                with contextlib.suppress(Exception):
-                    await client.disconnect()
+                cleanup = await self._async_cleanup_candidate(
+                    client,
+                    reason=reason,
+                )
                 LOGGER.debug(
                     "BLE connect failed for %s "
                     "(reason=%s, resolution=%s, source=%s, age=%s, "
-                    "connect_elapsed=%.1fs, total_elapsed=%.1fs): %s",
+                    "connect_elapsed=%.1fs, cleanup_elapsed=%.1fs, "
+                    "total_elapsed=%.1fs): %s",
                     self._key.lockMac,
                     reason,
                     candidate.resolution,
                     candidate.source,
                     f"{age:.1f}s" if age is not None else "unknown",
                     monotonic() - connect_started,
+                    cleanup.elapsed,
                     monotonic() - started,
                     exc,
                 )
-                if not active_scan or active_acquisition_attempted:
-                    candidate = None
+                if not cleanup.succeeded:
                     break
-                active_acquisition_attempted = True
-                LOGGER.debug(
-                    "Cached BLE route failed before command/authentication for %s; "
-                    "starting one fresh address-scoped acquisition (reason=%s)",
-                    self._key.lockMac,
-                    reason,
-                )
-                candidate = await self._async_wait_for_connectable_device_locked(
-                    reason=reason,
-                )
-                continue
             except Exception as exc:  # noqa: BLE001
                 # The SDK wraps connector failures, but later notification/GATT
                 # setup can still surface a raw exception. Contain and clean it
                 # without adding retries or changing the acquisition policy.
                 await self._async_discard_failed_setup(client, reason, exc)
                 break
-            if self._closing_event.is_set():
-                with contextlib.suppress(Exception):
-                    await client.disconnect()
+            else:
+                if timeout_result is None:
+                    return await self._async_adopt_connected_candidate(
+                        client,
+                        candidate=candidate,
+                        elapsed=(
+                            monotonic() - connect_started,
+                            monotonic() - started,
+                        ),
+                        intent=intent,
+                        reason=reason,
+                    )
                 LOGGER.debug(
-                    "Discarded late BLE connection for %s (reason=%s, failure=closing)",
+                    "BLE connection acquisition timed out for %s "
+                    "(reason=%s, intent=%s, resolution=%s, "
+                    "configured_phase_deadline=%.1fs, timeout_elapsed=%.1fs, "
+                    "cleanup_elapsed=%.1fs, total_budget=%.1fs, "
+                    "total_elapsed=%.1fs)",
                     self._key.lockMac,
                     reason,
+                    intent.value,
+                    candidate.resolution,
+                    phase_timeout,
+                    timeout_result.acquisition_elapsed,
+                    timeout_result.cleanup.elapsed,
+                    budget,
+                    monotonic() - started,
                 )
-                return None
+                if not timeout_result.cleanup.succeeded:
+                    break
+
+            if not active_scan or active_acquisition_attempted:
+                break
+            active_acquisition_attempted = True
             LOGGER.debug(
-                "BLE connection established for %s "
-                "(reason=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs)",
+                "Cached BLE route ended before command/authentication for %s; "
+                "starting one fresh address-scoped acquisition after cleanup "
+                "(reason=%s, intent=%s, remaining_intent_time=%.1fs)",
                 self._key.lockMac,
                 reason,
-                monotonic() - connect_started,
-                monotonic() - started,
+                intent.value,
+                self._remaining_acquisition_time(deadline),
             )
-            client.add_event_listener(self._on_event)
-            self._client = client
-            self._last_connection_rssi = candidate.rssi
-            self._disconnected.clear()
-            self._broadcast_connection_state(connected=True)
-            return client
+            candidate = await self._async_wait_for_connectable_device_locked(
+                deadline=deadline,
+                reason=reason,
+            )
         if not self._closing_event.is_set():
             self._record_reachability_diagnostic(reason, started)
         return None
+
+    async def _async_adopt_connected_candidate(
+        self,
+        client: TTLockClient,
+        *,
+        candidate: _ConnectionCandidate,
+        elapsed: tuple[float, float],
+        intent: _AcquisitionIntent,
+        reason: str,
+    ) -> TTLockClient | None:
+        """Publish a completed connection unless config-entry shutdown won."""
+        if self._closing_event.is_set():
+            await self._async_cleanup_candidate(client, reason=reason)
+            LOGGER.debug(
+                "Discarded late BLE connection for %s (reason=%s, failure=closing)",
+                self._key.lockMac,
+                reason,
+            )
+            return None
+        LOGGER.debug(
+            "BLE connection established for %s "
+            "(reason=%s, intent=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs)",
+            self._key.lockMac,
+            reason,
+            intent.value,
+            elapsed[0],
+            elapsed[1],
+        )
+        client.add_event_listener(self._on_event)
+        self._client = client
+        self._last_connection_rssi = candidate.rssi
+        self._disconnected.clear()
+        self._broadcast_connection_state(connected=True)
+        return client
+
+    @staticmethod
+    def _remaining_acquisition_time(deadline: float) -> float:
+        """Return non-negative time remaining on one absolute intent deadline."""
+        return max(0.0, deadline - monotonic())
+
+    async def _async_connect_before_deadline(
+        self,
+        client: TTLockClient,
+        *,
+        phase_timeout: float,
+        intent: _AcquisitionIntent,
+        reason: str,
+    ) -> _ConnectTimeoutResult | None:
+        """Connect in this task, cancelling and cleaning up at the phase deadline."""
+        connect_started = monotonic()
+        timeout_context = asyncio.timeout(phase_timeout)
+        try:
+            async with timeout_context:
+                await client.connect()
+        except asyncio.CancelledError:
+            cleanup = await self._async_cleanup_candidate(
+                client,
+                reason=reason,
+            )
+            LOGGER.debug(
+                "BLE acquisition externally cancelled for %s "
+                "(reason=%s, intent=%s, acquisition_elapsed=%.1fs, "
+                "cleanup_elapsed=%.1fs)",
+                self._key.lockMac,
+                reason,
+                intent.value,
+                monotonic() - connect_started,
+                cleanup.elapsed,
+            )
+            raise
+        except TimeoutError:
+            # A TimeoutError raised by the SDK itself is an ordinary setup
+            # failure. Only the timeout context's own cancellation is the
+            # integration's acquisition deadline.
+            if not timeout_context.expired():
+                raise
+            acquisition_elapsed = monotonic() - connect_started
+            cleanup = await self._async_cleanup_candidate(
+                client,
+                reason=reason,
+            )
+            return _ConnectTimeoutResult(
+                acquisition_elapsed=acquisition_elapsed,
+                cleanup=cleanup,
+            )
+        return None
+
+    async def _async_cleanup_candidate(
+        self,
+        client: TTLockClient,
+        *,
+        reason: str,
+    ) -> _CleanupResult:
+        """Await candidate teardown and report duration without masking outcomes."""
+        cleanup_started = monotonic()
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001 -- cleanup failure must not mask outcome
+            LOGGER.debug(
+                "BLE candidate cleanup failed for %s (reason=%s)",
+                self._key.lockMac,
+                reason,
+                exc_info=True,
+            )
+            return _CleanupResult(
+                elapsed=monotonic() - cleanup_started,
+                succeeded=False,
+            )
+        return _CleanupResult(
+            elapsed=monotonic() - cleanup_started,
+            succeeded=True,
+        )
 
     async def _async_discard_failed_setup(
         self,
@@ -632,8 +854,7 @@ class TtlockBleConnection:
         exc: Exception,
     ) -> None:
         """Clean up an unwrapped SDK setup failure without changing retries."""
-        with contextlib.suppress(Exception):
-            await client.disconnect()
+        await self._async_cleanup_candidate(client, reason=reason)
         LOGGER.warning(
             "BLE setup failed for %s (reason=%s): %s",
             self._key.lockMac,
@@ -645,6 +866,7 @@ class TtlockBleConnection:
         self,
         *,
         active_scan: bool,
+        deadline: float,
         reason: str,
     ) -> tuple[_ConnectionCandidate | None, bool]:
         """Resolve history or perform the one initial active acquisition."""
@@ -659,7 +881,10 @@ class TtlockBleConnection:
         ):
             return candidate, False
         return (
-            await self._async_wait_for_connectable_device_locked(reason=reason),
+            await self._async_wait_for_connectable_device_locked(
+                deadline=deadline,
+                reason=reason,
+            ),
             True,
         )
 
@@ -834,18 +1059,34 @@ class TtlockBleConnection:
     async def _async_wait_for_connectable_device_locked(
         self,
         *,
+        deadline: float,
         reason: str,
     ) -> _ConnectionCandidate | None:
         """Wait for this address through HA's Auto-mode active-scan scheduler."""
         address = self._key.lockMac
         started = monotonic()
+        scan_timeout = min(
+            float(EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS),
+            self._remaining_acquisition_time(deadline),
+        )
+        # HA's public API takes whole seconds. Flooring preserves the absolute
+        # intent deadline; a sub-second remainder is too short to start a scan.
+        scan_timeout_seconds = int(scan_timeout)
+        if scan_timeout_seconds <= 0:
+            LOGGER.debug(
+                "Skipping address-scoped active acquisition for %s "
+                "(reason=%s, remaining_intent_time=0.0s)",
+                address,
+                reason,
+            )
+            return None
         max_history_age = self._active_history_freshness_seconds()
         LOGGER.debug(
             "Starting address-scoped active acquisition for %s "
-            "(reason=%s, timeout=%ds, max_history_age=%.1fs)",
+            "(reason=%s, timeout=%.1fs, max_history_age=%.1fs)",
             address,
             reason,
-            EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+            scan_timeout_seconds,
             max_history_age,
         )
         resolved: list[_ConnectionCandidate] = []
@@ -888,7 +1129,7 @@ class TtlockBleConnection:
                 _candidate_available,
                 BluetoothCallbackMatcher(address=address, connectable=True),
                 BluetoothScanningMode.ACTIVE,
-                EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+                scan_timeout_seconds,
             ),
             name=f"{DOMAIN}.active_scan.{address}",
         )
@@ -908,8 +1149,8 @@ class TtlockBleConnection:
                 await advertisement_task
             except TimeoutError:
                 LOGGER.debug(
-                    "Address-scoped active acquisition timed out after %ds for %s",
-                    EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+                    "Address-scoped active acquisition timed out after %.1fs for %s",
+                    scan_timeout_seconds,
                     address,
                 )
                 return None
@@ -1009,6 +1250,7 @@ class TtlockBleConnection:
             try:
                 async with self._lock:
                     client = await self._async_ensure_connected_locked(
+                        intent=_AcquisitionIntent.BACKGROUND_MAINTENANCE,
                         reason="background maintenance",
                     )
                 if client is None:

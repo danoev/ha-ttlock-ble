@@ -17,10 +17,19 @@ from ttlock_ble import KeyboardPwdType, LockEvent, LockState, TTLockClient, TTLo
 
 from custom_components.ttlock_ble.client import ControlOutcomeUnknownError
 from custom_components.ttlock_ble.connection import (
+    AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS,
+    CACHED_CONNECT_TIMEOUT_SECONDS,
     EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+    EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS,
+    FRESH_CONNECT_TIMEOUT_SECONDS,
+    MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS,
     ROBUST_CONNECT_ATTEMPTS,
+    ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS,
     SPECULATIVE_CACHED_CONNECT_ATTEMPTS,
+    UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS,
     TtlockBleConnection,
+    _acquisition_budget,
+    _AcquisitionIntent,
     connection_signal,
     event_signal,
     log_signal,
@@ -75,6 +84,60 @@ def _fresh_service_info(
     )
 
 
+class _BlockedSdkConnect:
+    """Event-controlled model of one blocked stage inside SDK connect()."""
+
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.slot = asyncio.Semaphore(1)
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.observed_task: asyncio.Task | None = None
+        self.notify_char = MagicMock(name="NotifyCharacteristic")
+        self.backend = MagicMock(name="BleakBackend", is_connected=True)
+        self.backend.start_notify = AsyncMock(side_effect=self.start_notify)
+        self.backend.stop_notify = AsyncMock(return_value=None)
+        self.backend.disconnect = AsyncMock(side_effect=self.disconnect_backend)
+
+    async def block(self) -> None:
+        self.observed_task = asyncio.current_task()
+        self.started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            self.cancelled.set()
+
+    async def establish(self, *_args, **_kwargs):
+        await self.slot.acquire()
+        if self.stage == "connector":
+            try:
+                await self.block()
+            finally:
+                self.slot.release()
+        return self.backend
+
+    async def discover(self, client) -> None:
+        if self.stage == "service_discovery":
+            await self.block()
+        client._notify_char = self.notify_char
+
+    async def start_notify(self, *_args) -> None:
+        if self.stage == "notification_setup":
+            await self.block()
+
+    async def settle(self, _delay: float) -> None:
+        if self.stage == "post_notify_settle":
+            await self.block()
+
+    async def wake_battery(self, _client) -> None:
+        if self.stage == "battery_wake_read":
+            await self.block()
+
+    async def disconnect_backend(self) -> None:
+        if self.slot.locked():
+            self.slot.release()
+
+
 def test_event_signal_lowercases_mac() -> None:
     assert event_signal("AA:BB:CC:DD:EE:FF") == "ttlock_ble_event_aa:bb:cc:dd:ee:ff"
 
@@ -84,6 +147,47 @@ def test_connection_signal_lowercases_mac() -> None:
         connection_signal("AA:BB:CC:DD:EE:FF")
         == "ttlock_ble_connection_aa:bb:cc:dd:ee:ff"
     )
+
+
+@pytest.mark.parametrize(
+    ("intent", "expected"),
+    [
+        (
+            _AcquisitionIntent.EXPLICIT_CONTROL,
+            EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
+            _AcquisitionIntent.MANAGEMENT,
+            MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
+            _AcquisitionIntent.ROUTINE_QUERY,
+            ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
+            _AcquisitionIntent.UNKNOWN_BOOTSTRAP,
+            UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
+            _AcquisitionIntent.AMBIGUOUS_RECONCILIATION,
+            AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
+            _AcquisitionIntent.OPERATION_LOG,
+            ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
+            _AcquisitionIntent.BACKGROUND_MAINTENANCE,
+            ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+    ],
+)
+def test_acquisition_intents_have_explicit_validation_budgets(
+    intent,
+    expected,
+) -> None:
+    """Acquisition policy is typed and never inferred from diagnostic text."""
+    assert _acquisition_budget(intent) == expected
 
 
 async def test_is_connected_false_before_start(hass, sample_virtual_key) -> None:
@@ -661,6 +765,232 @@ async def test_failed_fresh_candidate_does_not_repeat_active_acquisition(
     fresh_client.unlock.assert_not_awaited()
 
 
+async def test_cached_deadline_awaits_cleanup_before_one_fresh_fallback(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A timed-out stale route cannot overlap its fresh HA acquisition."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    connect_cancelled = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def _stale_connect() -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            connect_cancelled.set()
+
+    async def _stale_disconnect() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+
+    stale_client = mock_ttlock_client
+    stale_client.connect.side_effect = _stale_connect
+    stale_client.disconnect.side_effect = _stale_disconnect
+    fresh_client = MagicMock(name="FreshClient", is_connected=True)
+    fresh_client.connect = AsyncMock(return_value=None)
+    fresh_client.disconnect = AsyncMock(return_value=None)
+    fresh_client.lock = AsyncMock(return_value=None)
+    fresh_client.add_event_listener = MagicMock()
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        stale_client,
+        fresh_client,
+    ]
+
+    async def _fresh_advertisement(_hass, callback, *_args) -> None:
+        assert cleanup_finished.is_set()
+        assert callback(_fresh_service_info(mock_ble_device)) is True
+
+    mock_active_scan.side_effect = _fresh_advertisement
+    with patch(
+        "custom_components.ttlock_ble.connection.CACHED_CONNECT_TIMEOUT_SECONDS",
+        0.02,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        operation = asyncio.create_task(conn.async_lock())
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        mock_active_scan.assert_not_awaited()
+        release_cleanup.set()
+        await operation
+
+    assert connect_cancelled.is_set()
+    assert cleanup_finished.is_set()
+    stale_client.disconnect.assert_awaited_once()
+    mock_active_scan.assert_awaited_once()
+    fresh_client.connect.assert_awaited_once()
+    fresh_client.lock.assert_awaited_once()
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
+
+
+async def test_cached_timeout_cleanup_failure_stops_before_fresh_fallback(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A teardown error cannot permit a possibly live cached route to overlap."""
+
+    async def _stale_connect() -> None:
+        await asyncio.Future()
+
+    mock_ttlock_client.connect.side_effect = _stale_connect
+    mock_ttlock_client.disconnect.side_effect = BleakError("disconnect failed")
+    with patch(
+        "custom_components.ttlock_ble.connection.CACHED_CONNECT_TIMEOUT_SECONDS",
+        0.02,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        with pytest.raises(TTLockError, match="not reachable"):
+            await conn.async_lock()
+
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_active_scan.assert_not_awaited()
+    mock_ttlock_client.lock.assert_not_awaited()
+
+
+async def test_fresh_route_deadline_terminates_without_second_acquisition(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A newly observed route times out once and cannot restart the scan loop."""
+    mock_ble_resolver.return_value = None
+    connect_cancelled = asyncio.Event()
+
+    async def _fresh_connect() -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            connect_cancelled.set()
+
+    async def _fresh_advertisement(_hass, callback, *_args) -> None:
+        assert callback(_fresh_service_info(mock_ble_device)) is True
+
+    mock_ttlock_client.connect.side_effect = _fresh_connect
+    mock_active_scan.side_effect = _fresh_advertisement
+    with patch(
+        "custom_components.ttlock_ble.connection.FRESH_CONNECT_TIMEOUT_SECONDS",
+        0.02,
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        with pytest.raises(TTLockError, match="not reachable"):
+            await conn.async_lock()
+
+    assert connect_cancelled.is_set()
+    mock_active_scan.assert_awaited_once()
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+
+
+async def test_one_absolute_deadline_clips_cached_scan_and_fresh_phases(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Nominal 16+25+42 phases share one 60-second control deadline."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    clock = [0.0]
+    connect_windows: list[float] = []
+    scan_windows: list[float] = []
+    fresh_client = MagicMock(name="FreshClient", is_connected=False)
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        mock_ttlock_client,
+        fresh_client,
+    ]
+
+    async def _time_out_connect(_client, *, phase_timeout, **_kwargs):
+        connect_windows.append(phase_timeout)
+        clock[0] += phase_timeout
+        return SimpleNamespace(
+            acquisition_elapsed=phase_timeout,
+            cleanup=SimpleNamespace(elapsed=0.0, succeeded=True),
+        )
+
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    async def _active_acquisition(*, deadline, reason):
+        scan_window = min(
+            EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+            deadline - clock[0],
+        )
+        scan_windows.append(scan_window)
+        clock[0] += scan_window
+        return conn._resolve_connection_candidate(
+            include_scanner_paths=True,
+            reason=reason,
+        )
+
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.monotonic",
+            side_effect=lambda: clock[0],
+        ),
+        patch.object(
+            conn,
+            "_async_connect_before_deadline",
+            new=AsyncMock(side_effect=_time_out_connect),
+        ),
+        patch.object(
+            conn,
+            "_async_wait_for_connectable_device_locked",
+            new=AsyncMock(side_effect=_active_acquisition),
+        ),
+        pytest.raises(TTLockError, match="not reachable"),
+    ):
+        await conn.async_lock()
+
+    assert connect_windows == [
+        CACHED_CONNECT_TIMEOUT_SECONDS,
+        EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS
+        - CACHED_CONNECT_TIMEOUT_SECONDS
+        - EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
+    ]
+    assert scan_windows == [EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS]
+    assert connect_windows[1] < FRESH_CONNECT_TIMEOUT_SECONDS
+    assert sum(connect_windows) + sum(scan_windows) == (
+        EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS
+    )
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
+
+
+async def test_active_scan_window_is_clipped_to_remaining_absolute_deadline(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_active_scan,
+) -> None:
+    """HA's whole-second scan timeout never exceeds the intent remainder."""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    with patch(
+        "custom_components.ttlock_ble.connection.monotonic",
+        return_value=100.0,
+    ):
+        assert (
+            await conn._async_wait_for_connectable_device_locked(
+                deadline=110.9,
+                reason="deadline test",
+            )
+            is None
+        )
+
+    assert mock_active_scan.await_args.args[4] == 10
+
+
 @pytest.mark.parametrize("source", ["hci0", "esp32-proxy-kitchen"])
 async def test_cold_idle_uses_connectable_scanner_path_without_aggregate_history(
     hass,
@@ -786,6 +1116,161 @@ async def test_sdk_connection_boundary_allows_transient_retry_success(
     assert sdk_client.is_connected
 
 
+@pytest.mark.parametrize(
+    ("active_scan", "nominal_attempts", "literal_attempts"),
+    [
+        (True, SPECULATIVE_CACHED_CONNECT_ATTEMPTS, 5),
+        (False, ROBUST_CONNECT_ATTEMPTS, 7),
+    ],
+)
+async def test_wall_clock_deadline_bounds_connector_transient_attempts(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+    caplog,
+    *,
+    active_scan: bool,
+    nominal_attempts: int,
+    literal_attempts: int,
+) -> None:
+    """Connector transient accounting may exceed max_attempts; time still wins."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    attempts = 0
+    connect_finished = asyncio.Event()
+
+    async def _connector_with_independent_transient_budget() -> None:
+        nonlocal attempts
+        try:
+            for _ in range(literal_attempts):
+                attempts += 1
+                await asyncio.sleep(0)
+            await asyncio.Future()
+        finally:
+            connect_finished.set()
+
+    mock_ttlock_client.connect.side_effect = (
+        _connector_with_independent_transient_budget
+    )
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.CACHED_CONNECT_TIMEOUT_SECONDS",
+            0.02,
+        ),
+        caplog.at_level(logging.DEBUG, logger="custom_components.ttlock_ble"),
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        if active_scan:
+            with pytest.raises(TTLockError, match="not reachable"):
+                await conn.async_lock()
+        else:
+            assert await conn.async_query_state() is None
+
+    assert attempts == literal_attempts
+    assert attempts > nominal_attempts
+    assert connect_finished.is_set()
+    assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args_list[0].kwargs[
+            "connect_attempts"
+        ]
+        == nominal_attempts
+    )
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_ttlock_client.query_state.assert_not_awaited()
+    mock_ttlock_client.lock.assert_not_awaited()
+    if active_scan:
+        mock_active_scan.assert_awaited_once()
+    else:
+        mock_active_scan.assert_not_awaited()
+    for credential in (
+        sample_virtual_key.aesKeyStr,
+        sample_virtual_key.unlockKey,
+        sample_virtual_key.adminPs,
+    ):
+        assert credential not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "blocked_stage",
+    [
+        "connector",
+        "service_discovery",
+        "notification_setup",
+        "post_notify_settle",
+        "battery_wake_read",
+    ],
+)
+async def test_connect_stage_deadline_cancels_before_auth_and_releases_slot(
+    hass,
+    sample_virtual_key,
+    mock_ble_device,
+    mock_ble_resolver,
+    mock_active_scan,
+    blocked_stage: str,
+) -> None:
+    """Every SDK connect stage stays on the cancellable acquisition side."""
+    from custom_components.ttlock_ble.client import TtlockBleClient
+
+    scenario = _BlockedSdkConnect(blocked_stage)
+    created_clients: list[TtlockBleClient] = []
+    original_factory = TtlockBleClient.from_ble_device
+
+    def _factory(*args, **kwargs) -> TtlockBleClient:
+        client = original_factory(*args, **kwargs)
+        created_clients.append(client)
+        return client
+
+    async def _discover(client: TtlockBleClient) -> None:
+        await scenario.discover(client)
+
+    async def _wake_battery(client: TtlockBleClient) -> None:
+        await scenario.wake_battery(client)
+
+    auth = AsyncMock(name="check_user_time")
+    control = AsyncMock(name="lock_control")
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.CACHED_CONNECT_TIMEOUT_SECONDS",
+            0.02,
+        ),
+        patch(
+            "custom_components.ttlock_ble.connection.TtlockBleClient.from_ble_device",
+            side_effect=_factory,
+        ),
+        patch(
+            "ttlock_ble.client.establish_connection",
+            side_effect=scenario.establish,
+        ),
+        patch.object(TtlockBleClient, "_discover_chars", new=_discover),
+        patch.object(
+            TtlockBleClient,
+            "_wake_battery_read",
+            new=_wake_battery,
+        ),
+        patch("ttlock_ble.client.asyncio.sleep", new=scenario.settle),
+        patch.object(TtlockBleClient, "_check_user_time", new=auth),
+        patch.object(TtlockBleClient, "lock", new=control),
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        operation = asyncio.create_task(conn.async_lock())
+        await asyncio.wait_for(scenario.started.wait(), timeout=1)
+        with pytest.raises(TTLockError, match="not reachable"):
+            await operation
+
+    assert scenario.cancelled.is_set()
+    assert scenario.observed_task is operation
+    assert len(created_clients) == 1
+    assert created_clients[0]._client is None
+    assert created_clients[0]._ha_control_frame_written is False
+    auth.assert_not_awaited()
+    control.assert_not_awaited()
+    mock_active_scan.assert_awaited_once()
+    await asyncio.wait_for(scenario.slot.acquire(), timeout=0.1)
+    scenario.slot.release()
+
+
 async def test_explicit_command_active_scan_uses_fresh_callback_device(
     hass,
     sample_virtual_key,
@@ -843,7 +1328,7 @@ async def test_explicit_acquisition_timeout_does_not_connect(
         ),
         patch(
             "custom_components.ttlock_ble.connection.EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS",
-            0.015,
+            1,
         ),
         patch(
             "custom_components.ttlock_ble.connection."
@@ -1021,6 +1506,7 @@ async def test_explicit_command_reuses_background_connection_in_progress(
     async def _background_acquire():
         async with conn._lock:
             return await conn._async_ensure_connected_locked(
+                intent=_AcquisitionIntent.BACKGROUND_MAINTENANCE,
                 reason="background maintenance",
             )
 
@@ -1053,6 +1539,7 @@ async def test_background_connect_failure_remains_non_active(
 
     async with conn._lock:
         result = await conn._async_ensure_connected_locked(
+            intent=_AcquisitionIntent.BACKGROUND_MAINTENANCE,
             reason="background maintenance",
         )
 
@@ -1106,6 +1593,7 @@ async def test_explicit_command_runs_after_failed_background_attempt(
     async def _background_acquire():
         async with conn._lock:
             return await conn._async_ensure_connected_locked(
+                intent=_AcquisitionIntent.BACKGROUND_MAINTENANCE,
                 reason="background maintenance",
             )
 
@@ -1129,24 +1617,45 @@ async def test_cancelling_during_gatt_connect_disconnects_partial_client(
     sample_virtual_key,
     mock_ble_resolver,
     mock_ttlock_client,
+    mock_active_scan,
 ) -> None:
     """Cancellation during SDK acquisition cannot retain or finish a late link."""
     connect_started = asyncio.Event()
+    connect_cancelled = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
 
     async def _connect() -> None:
         connect_started.set()
-        await asyncio.Future()
+        try:
+            await asyncio.Future()
+        finally:
+            connect_cancelled.set()
+
+    async def _disconnect() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
 
     mock_ttlock_client.connect.side_effect = _connect
+    mock_ttlock_client.disconnect.side_effect = _disconnect
     conn = TtlockBleConnection(hass, sample_virtual_key)
     operation = asyncio.create_task(conn.async_lock())
     await asyncio.wait_for(connect_started.wait(), timeout=1)
     operation.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    assert connect_cancelled.is_set()
+    assert not operation.done()
+    mock_active_scan.assert_not_awaited()
+    release_cleanup.set()
     with pytest.raises(asyncio.CancelledError):
         await operation
 
+    assert cleanup_finished.is_set()
     mock_ttlock_client.disconnect.assert_awaited_once()
     mock_ttlock_client.lock.assert_not_awaited()
+    mock_active_scan.assert_not_awaited()
     assert conn._client is None
 
 
@@ -1505,6 +2014,7 @@ async def test_background_acquisition_does_not_use_explicit_scanner_fallback(
         conn = TtlockBleConnection(hass, sample_virtual_key)
         async with conn._lock:
             client = await conn._async_ensure_connected_locked(
+                intent=_AcquisitionIntent.BACKGROUND_MAINTENANCE,
                 reason="background maintenance",
             )
 
