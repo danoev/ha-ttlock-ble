@@ -7,6 +7,7 @@ import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from bleak.exc import BleakError
 from ttlock_ble import TTLockError
 from ttlock_ble import commands as cmd
 from ttlock_ble.crypto import aes_encrypt
@@ -125,6 +126,17 @@ async def test_shutdown_after_control_begins_does_not_cancel_or_resend(
     assert client.control_stage is ControlStage.CONTROL_ACKNOWLEDGED
 
 
+def test_historical_committed_stage_is_not_a_current_commit(
+    sample_virtual_key,
+) -> None:
+    """A completed prior command cannot commit a future control attempt."""
+    client = _client(sample_virtual_key)
+    client._ha_control_stage = ControlStage.CONTROL_ACKNOWLEDGED
+    client._ha_control_active = False
+
+    assert client.control_committed is False
+
+
 async def test_timeout_before_control_write_remains_a_known_failure(
     sample_virtual_key,
 ) -> None:
@@ -157,6 +169,108 @@ async def test_written_control_without_ack_is_unknown_and_never_retried(
 
     with pytest.raises(ControlOutcomeUnknownError, match="was not retried"):
         await client.unlock()
+
+    client._control_lock.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [
+        BleakError("transport dropped after write start"),
+        RuntimeError("response parser failed"),
+    ],
+)
+async def test_raw_post_commit_escape_is_unknown(
+    sample_virtual_key,
+    escape: Exception,
+) -> None:
+    """Every raw failure after write start preserves the physical ambiguity."""
+    client = _client(sample_virtual_key)
+    client._check_user_time = AsyncMock(return_value=123)
+
+    async def _control_once(*_args) -> None:
+        client._ha_control_stage = ControlStage.CONTROL_WRITE_STARTED
+        raise escape
+
+    client._control_lock = AsyncMock(side_effect=_control_once)
+
+    with pytest.raises(ControlOutcomeUnknownError, match="was not retried"):
+        await client.unlock()
+
+    client._control_lock.assert_awaited_once()
+
+
+async def test_ack_wait_cancellation_after_write_start_is_unknown(
+    sample_virtual_key,
+) -> None:
+    """Cancellation while awaiting the ACK cannot erase a committed attempt."""
+    client = _client(sample_virtual_key)
+    client._check_user_time = AsyncMock(return_value=123)
+
+    async def _cancelled_ack_wait(*_args) -> None:
+        client._ha_control_stage = ControlStage.CONTROL_FRAME_WRITTEN
+        raise asyncio.CancelledError
+
+    client._control_lock = AsyncMock(side_effect=_cancelled_ack_wait)
+
+    with pytest.raises(ControlOutcomeUnknownError, match="was not retried"):
+        await client.lock()
+
+    client._control_lock.assert_awaited_once()
+
+
+async def test_control_write_failure_after_start_is_unknown(
+    sample_virtual_key,
+) -> None:
+    """A transport failure inside the first control write is already ambiguous."""
+    client = _client(sample_virtual_key)
+    client._check_user_time = AsyncMock(return_value=123)
+    control_frame = Frame.for_lock(
+        sample_virtual_key.lockVersion,
+        cmd.CMD_UNLOCK,
+        b"encrypted-placeholder",
+    )
+
+    async def _write_control(*_args) -> None:
+        await client._send(control_frame)
+
+    client._control_lock = AsyncMock(side_effect=_write_control)
+    with (
+        patch(
+            "ttlock_ble.client.TTLockClient._send",
+            new=AsyncMock(side_effect=OSError("link dropped during write")),
+        ),
+        pytest.raises(ControlOutcomeUnknownError, match="was not retried"),
+    ):
+        await client.unlock()
+
+    client._control_lock.assert_awaited_once()
+
+
+async def test_control_write_cancellation_after_start_is_unknown(
+    sample_virtual_key,
+) -> None:
+    """Cancellation inside the first physical write preserves ambiguity."""
+    client = _client(sample_virtual_key)
+    client._check_user_time = AsyncMock(return_value=123)
+    control_frame = Frame.for_lock(
+        sample_virtual_key.lockVersion,
+        cmd.CMD_LOCK,
+        b"encrypted-placeholder",
+    )
+
+    async def _write_control(*_args) -> None:
+        await client._send(control_frame)
+
+    client._control_lock = AsyncMock(side_effect=_write_control)
+    with (
+        patch(
+            "ttlock_ble.client.TTLockClient._send",
+            new=AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        pytest.raises(ControlOutcomeUnknownError, match="was not retried"),
+    ):
+        await client.lock()
 
     client._control_lock.assert_awaited_once()
 
@@ -297,6 +411,7 @@ async def test_control_diagnostics_never_log_credentials(
 
     async def _ambiguous(*_args) -> None:
         client._ha_control_frame_written = True
+        client._ha_control_stage = ControlStage.CONTROL_FRAME_WRITTEN
         message = "reply lost"
         raise TTLockError(message)
 

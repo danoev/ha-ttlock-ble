@@ -173,6 +173,7 @@ def mock_ttlock_client() -> Generator[MagicMock]:
     """Patch `TTLockClient.from_ble_device` returning a controllable mock."""
     instance = MagicMock(name="TTLockClient")
     instance.is_connected = True
+    instance.control_committed = False
     instance.connect = AsyncMock(return_value=None)
     instance.disconnect = AsyncMock(return_value=None)
     instance.query_state = AsyncMock(return_value=(0, 80))

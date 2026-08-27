@@ -660,12 +660,22 @@ async def test_learned_stale_cached_route_scans_before_gatt(
         await conn.async_lock()
 
     mock_active_scan.assert_awaited_once()
-    connection_module.TtlockBleClient.from_ble_device.assert_called_once_with(
+    connection_module.TtlockBleClient.from_ble_device.assert_called_once()
+    assert connection_module.TtlockBleClient.from_ble_device.call_args.args == (
         fresh_device,
         sample_virtual_key,
-        disconnected_callback=conn._on_disconnected,
-        connect_attempts=ROBUST_CONNECT_ATTEMPTS,
     )
+    assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args.kwargs[
+            "connect_attempts"
+        ]
+        == ROBUST_CONNECT_ATTEMPTS
+    )
+    callback = connection_module.TtlockBleClient.from_ble_device.call_args.kwargs[
+        "disconnected_callback"
+    ]
+    assert callback.func == conn._on_disconnected
+    assert callback.keywords == {"generation": 1}
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.lock.assert_awaited_once()
 
@@ -1185,12 +1195,22 @@ async def test_cold_idle_uses_connectable_scanner_path_without_aggregate_history
     mock_active_scan.assert_not_awaited()
     from custom_components.ttlock_ble import connection as connection_module
 
-    connection_module.TtlockBleClient.from_ble_device.assert_called_once_with(
+    connection_module.TtlockBleClient.from_ble_device.assert_called_once()
+    assert connection_module.TtlockBleClient.from_ble_device.call_args.args == (
         mock_ble_device,
         sample_virtual_key,
-        disconnected_callback=conn._on_disconnected,
-        connect_attempts=SPECULATIVE_CACHED_CONNECT_ATTEMPTS,
     )
+    assert (
+        connection_module.TtlockBleClient.from_ble_device.call_args.kwargs[
+            "connect_attempts"
+        ]
+        == SPECULATIVE_CACHED_CONNECT_ATTEMPTS
+    )
+    callback = connection_module.TtlockBleClient.from_ble_device.call_args.kwargs[
+        "disconnected_callback"
+    ]
+    assert callback.func == conn._on_disconnected
+    assert callback.keywords == {"generation": 1}
     mock_ttlock_client.connect.assert_awaited_once()
     mock_ttlock_client.unlock.assert_awaited_once()
 
@@ -2290,6 +2310,275 @@ async def test_ambiguous_control_with_contradictory_state_stays_unknown(
     mock_ttlock_client.unlock.assert_awaited_once()
     mock_ttlock_client.query_state.assert_awaited_once()
     mock_ttlock_client.disconnect.assert_awaited_once()
+
+
+async def test_post_commit_cancellation_retains_mutex_until_positive_ack(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Repeated caller cancellation cannot orphan a committed physical command."""
+    control_started = asyncio.Event()
+    release_control = asyncio.Event()
+    competing_query_finished = asyncio.Event()
+
+    async def _control_once() -> None:
+        mock_ttlock_client.control_stage = ControlStage.CONTROL_WRITE_STARTED
+        mock_ttlock_client.control_committed = True
+        control_started.set()
+        await release_control.wait()
+
+    mock_ttlock_client.control_stage = ControlStage.AUTHENTICATED
+    mock_ttlock_client.lock = AsyncMock(side_effect=_control_once)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(control_started.wait(), timeout=1)
+
+    operation.cancel()
+    await asyncio.sleep(0)
+    assert operation.done() is False
+    operation.cancel()
+    await asyncio.sleep(0)
+    assert operation.done() is False
+
+    async def _competing_query() -> None:
+        await conn.async_query_state()
+        competing_query_finished.set()
+
+    query = asyncio.create_task(_competing_query())
+    await asyncio.sleep(0)
+    assert operation.done() is False
+    assert competing_query_finished.is_set() is False
+    release_control.set()
+
+    await asyncio.wait_for(operation, timeout=1)
+    await asyncio.wait_for(query, timeout=1)
+
+    mock_ttlock_client.lock.assert_awaited_once()
+    assert conn._control_task is None
+    assert competing_query_finished.is_set()
+
+
+async def test_cancelled_ambiguous_command_reconciles_with_query_only(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A cancelled committed command may become known only through a state query."""
+    control_started = asyncio.Event()
+    release_control = asyncio.Event()
+    unknown = ControlOutcomeUnknownError(
+        "unlock",
+        disconnected=False,
+        routed_echoes=(),
+        response_unclassified=False,
+    )
+
+    async def _control_once() -> None:
+        mock_ttlock_client.control_stage = ControlStage.CONTROL_WRITE_STARTED
+        mock_ttlock_client.control_committed = True
+        control_started.set()
+        await release_control.wait()
+        raise unknown
+
+    mock_ttlock_client.control_stage = ControlStage.AUTHENTICATED
+    mock_ttlock_client.unlock = AsyncMock(side_effect=_control_once)
+    mock_ttlock_client.query_state = AsyncMock(return_value=(LockState.UNLOCKED, 80))
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_unlock())
+    await asyncio.wait_for(control_started.wait(), timeout=1)
+    operation.cancel()
+    release_control.set()
+
+    await asyncio.wait_for(operation, timeout=1)
+
+    mock_ttlock_client.unlock.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    mock_ttlock_client.query_state.assert_awaited_once()
+
+
+async def test_pre_control_cancellation_aborts_physical_task(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Cancellation remains safely abortable before the control-write boundary."""
+    authentication_started = asyncio.Event()
+    authentication_cancelled = asyncio.Event()
+
+    async def _before_control() -> None:
+        mock_ttlock_client.control_stage = ControlStage.AUTHENTICATED
+        mock_ttlock_client.control_committed = False
+        authentication_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            authentication_cancelled.set()
+
+    mock_ttlock_client.control_stage = ControlStage.BEFORE_AUTH
+    mock_ttlock_client.lock = AsyncMock(side_effect=_before_control)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(authentication_started.wait(), timeout=1)
+    operation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+    assert authentication_cancelled.is_set()
+    mock_ttlock_client.lock.assert_awaited_once()
+
+
+async def test_historical_stage_cannot_retain_not_started_control(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """Pre-start cancellation cannot inherit the prior command's commit stage."""
+    child_created = asyncio.Event()
+    release_child = asyncio.Event()
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+    )
+    client._client = MagicMock(is_connected=True)
+    client._ha_control_stage = ControlStage.CONTROL_ACKNOWLEDGED
+    client._ha_control_active = False
+    client._check_user_time = AsyncMock(return_value=123)
+    client._control_lock = AsyncMock(return_value=None)
+    client._restart_keep_alive = MagicMock()
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._client = client
+
+    def _defer_child(coro, *, name=None, eager_start=True):
+        async def _gated_child():
+            try:
+                await release_child.wait()
+            except asyncio.CancelledError:
+                coro.close()
+                raise
+            return await coro
+
+        child_created.set()
+        return asyncio.create_task(_gated_child(), name=name)
+
+    with patch.object(hass, "async_create_task", side_effect=_defer_child):
+        operation = asyncio.create_task(conn.async_lock())
+        await asyncio.wait_for(child_created.wait(), timeout=1)
+        operation.cancel()
+        await asyncio.sleep(0)
+        release_child.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(operation, timeout=1)
+
+    client._check_user_time.assert_not_awaited()
+    client._control_lock.assert_not_awaited()
+    assert conn._control_task is None
+
+
+async def test_retired_client_disconnect_callback_is_ignored(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A delayed callback from client A cannot mark adopted client B down."""
+    states: list[bool] = []
+    async_dispatcher_connect(
+        hass,
+        connection_signal(sample_virtual_key.lockMac),
+        states.append,
+    )
+    retired = MagicMock(name="RetiredClient", is_connected=False)
+    current = MagicMock(name="CurrentClient", is_connected=True)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._client = current
+    conn._owned_client_generation = 2
+    conn._broadcast_connection_state(connected=True)
+
+    conn._on_disconnected(retired, generation=1)
+    await hass.async_block_till_done()
+
+    assert states == [True]
+    assert conn._disconnected.is_set() is False
+
+
+async def test_current_generation_disconnect_callback_is_effective(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """The callback for the adopted client still publishes its real drop."""
+    states: list[bool] = []
+    async_dispatcher_connect(
+        hass,
+        connection_signal(sample_virtual_key.lockMac),
+        states.append,
+    )
+    current = MagicMock(name="CurrentClient", is_connected=True)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._client = current
+    conn._owned_client_generation = 2
+    conn._broadcast_connection_state(connected=True)
+
+    conn._on_disconnected(MagicMock(), generation=2)
+    await hass.async_block_till_done()
+
+    assert states == [True, False]
+    assert conn._disconnected.is_set()
+
+
+async def test_pending_generation_disconnect_callback_is_effective(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """Uncertain pending ownership still accepts its client's real drop."""
+    states: list[bool] = []
+    async_dispatcher_connect(
+        hass,
+        connection_signal(sample_virtual_key.lockMac),
+        states.append,
+    )
+    pending = MagicMock(name="PendingClient", is_connected=True)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._pending_client = pending
+    conn._owned_client_generation = 3
+    conn._broadcast_connection_state(connected=True)
+
+    conn._on_disconnected(MagicMock(), generation=3)
+    await hass.async_block_till_done()
+
+    assert states == [True, False]
+    assert conn._disconnected.is_set()
+
+
+async def test_cleaned_generation_disconnect_callback_is_ignored(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """Confirmed cleanup retires the generation before any delayed callback."""
+    states: list[bool] = []
+    async_dispatcher_connect(
+        hass,
+        connection_signal(sample_virtual_key.lockMac),
+        states.append,
+    )
+    pending = MagicMock(name="PendingClient", is_connected=False)
+    pending.disconnect = AsyncMock(return_value=None)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._pending_client = pending
+    conn._owned_client_generation = 4
+    conn._broadcast_connection_state(connected=True)
+
+    async with conn._lock:
+        assert await conn._async_retry_pending_cleanup_locked(reason="test") is True
+    assert conn._owned_client_generation is None
+    conn._disconnected.clear()
+    conn._on_disconnected(MagicMock(), generation=4)
+    await hass.async_block_till_done()
+
+    assert states == [True, False]
+    assert conn._disconnected.is_set() is False
 
 
 async def test_event_listener_dispatches_to_signal(

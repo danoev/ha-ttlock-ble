@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from enum import StrEnum
 from typing import TYPE_CHECKING, Self
 
@@ -36,7 +37,7 @@ class ControlStage(StrEnum):
 
 
 class ControlOutcomeUnknownError(TTLockError):
-    """The control frame was written but its successful outcome is unconfirmed."""
+    """Physical control may have begun but its outcome is unconfirmed."""
 
     def __init__(
         self,
@@ -59,8 +60,8 @@ class ControlOutcomeUnknownError(TTLockError):
         if response_unclassified:
             detail = "a response arrived but could not be classified safely"
         super().__init__(
-            f"{action} command was sent, but its outcome is unknown because {detail}; "
-            "the command was not retried"
+            f"{action} command may have been sent, but its outcome is unknown "
+            f"because {detail}; the command was not retried"
         )
 
 
@@ -138,6 +139,17 @@ class TtlockBleClient(TTLockClient):
         """Return the latest safe explicit-control milestone."""
         return self._ha_control_stage
 
+    @property
+    def control_committed(self) -> bool:
+        """Return whether the first physical control write may have begun."""
+        return self._ha_control_active and self._ha_control_stage in {
+            ControlStage.CONTROL_WRITE_STARTED,
+            ControlStage.CONTROL_FRAME_WRITTEN,
+            ControlStage.CONTROL_ACK_RECEIVED,
+            ControlStage.CONTROL_ACKNOWLEDGED,
+            ControlStage.CONTROL_ACK_REJECTED,
+        }
+
     def set_control_allowed(self, control_allowed: Callable[[], bool]) -> None:
         """Install the owning integration's synchronous pre-control gate."""
         self._ha_control_allowed = control_allowed
@@ -179,7 +191,11 @@ class TtlockBleClient(TTLockClient):
                 self._ha_require_control_allowed(action, boundary="before control")
                 try:
                     await self._control_lock(opcode, ps_from_lock, action)
-                except TTLockError as exc:
+                except asyncio.CancelledError as exc:
+                    if not self.control_committed:
+                        raise
+                    raise self._ha_unknown_control_outcome(action) from exc
+                except Exception as exc:
                     if self._ha_control_ack_received:
                         self._ha_control_stage = ControlStage.CONTROL_ACK_REJECTED
                         LOGGER.debug(
@@ -190,32 +206,16 @@ class TtlockBleClient(TTLockClient):
                             self._ha_control_stage,
                         )
                         raise
-                    if not self._ha_control_frame_written:
+                    if not self.control_committed:
                         LOGGER.debug(
-                            "Control failed before the complete frame was written for "
+                            "Control failed before the first physical write for "
                             "%s (action=%s, stage=%s)",
                             self.key.lockMac,
                             action,
                             self._ha_control_stage,
                         )
                         raise
-                    LOGGER.warning(
-                        "Control outcome unknown for %s "
-                        "(action=%s, stage=%s, disconnected=%s, "
-                        "routed_echoes=%s, response_unclassified=%s)",
-                        self.key.lockMac,
-                        action,
-                        self._ha_control_stage,
-                        self._ha_disconnected_during_control,
-                        [f"0x{echo:02x}" for echo in self._ha_routed_echoes],
-                        self._ha_response_unclassified,
-                    )
-                    raise ControlOutcomeUnknownError(
-                        action,
-                        disconnected=self._ha_disconnected_during_control,
-                        routed_echoes=tuple(self._ha_routed_echoes),
-                        response_unclassified=self._ha_response_unclassified,
-                    ) from exc
+                    raise self._ha_unknown_control_outcome(action) from exc
             self._ha_control_stage = ControlStage.CONTROL_ACKNOWLEDGED
             LOGGER.debug(
                 "Control stage for %s: %s", self.key.lockMac, self._ha_control_stage
@@ -223,6 +223,26 @@ class TtlockBleClient(TTLockClient):
             self._restart_keep_alive()
         finally:
             self._ha_control_active = False
+
+    def _ha_unknown_control_outcome(self, action: str) -> ControlOutcomeUnknownError:
+        """Build and log one credential-free post-commit ambiguity."""
+        LOGGER.warning(
+            "Control outcome unknown for %s "
+            "(action=%s, stage=%s, disconnected=%s, "
+            "routed_echoes=%s, response_unclassified=%s)",
+            self.key.lockMac,
+            action,
+            self._ha_control_stage,
+            self._ha_disconnected_during_control,
+            [f"0x{echo:02x}" for echo in self._ha_routed_echoes],
+            self._ha_response_unclassified,
+        )
+        return ControlOutcomeUnknownError(
+            action,
+            disconnected=self._ha_disconnected_during_control,
+            routed_echoes=tuple(self._ha_routed_echoes),
+            response_unclassified=self._ha_response_unclassified,
+        )
 
     def _ha_require_control_allowed(self, action: str, *, boundary: str) -> None:
         """Abort at a known pre-control boundary when config-entry shutdown won."""
@@ -309,7 +329,7 @@ class TtlockBleClient(TTLockClient):
             )
         return answers
 
-    def _ha_on_disconnected(self, client: BleakClient) -> None:
+    def _ha_on_disconnected(self, _client: BleakClient) -> None:
         """Record disconnect ordering and then preserve the caller's callback."""
         if self._ha_control_active:
             self._ha_disconnected_during_control = True
@@ -319,4 +339,4 @@ class TtlockBleClient(TTLockClient):
                 self._ha_control_stage,
             )
         if self._ha_disconnected_callback is not None:
-            self._ha_disconnected_callback(client)
+            self._ha_disconnected_callback(_client)

@@ -18,8 +18,9 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.bluetooth import (
     MONOTONIC_TIME,
@@ -166,6 +167,11 @@ class TtlockBleConnection:
         self._pending_client: TTLockClient | None = None
         self._cleanup_task: asyncio.Task[_CleanupResult] | None = None
         self._cleanup_task_client: TTLockClient | None = None
+        self._control_task: (
+            asyncio.Task[Exception | asyncio.CancelledError | None] | None
+        ) = None
+        self._next_client_generation = 0
+        self._owned_client_generation: int | None = None
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -428,10 +434,16 @@ class TtlockBleConnection:
                     msg = f"{msg}: {self._reachability_diagnostic}"
                 raise TTLockError(msg)
             try:
-                if action == "lock":
-                    await client.lock()
-                else:
-                    await client.unlock()
+                operation = client.lock if action == "lock" else client.unlock
+                task = self._hass.async_create_task(
+                    self._async_capture_control_outcome(operation),
+                    name=f"{DOMAIN}.control.{action}.{self._key.lockMac}",
+                )
+                self._control_task = task
+                await self._async_await_control_task_locked(
+                    task,
+                    cast("TtlockBleClient", client),
+                )
                 LOGGER.debug(
                     "Explicit %s completed for %s (elapsed=%.1fs)",
                     action,
@@ -461,6 +473,51 @@ class TtlockBleConnection:
                 await self._async_disconnect_locked()
                 msg = f"Lock {self._key.lockMac} failed to {action}: {exc}"
                 raise TTLockError(msg) from exc
+            finally:
+                if self._control_task is not None and self._control_task.done():
+                    self._control_task = None
+
+    async def _async_await_control_task_locked(
+        self,
+        task: asyncio.Task[Exception | asyncio.CancelledError | None],
+        client: TtlockBleClient,
+    ) -> None:
+        """Retain a committed command despite repeated caller cancellation."""
+        while True:
+            try:
+                outcome = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.done():
+                    outcome = task.result()
+                    if outcome is not None:
+                        raise outcome from None
+                    return
+                if not client.control_committed:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    raise
+                LOGGER.debug(
+                    "Caller cancellation retained committed control for %s",
+                    self._key.lockMac,
+                )
+            else:
+                if outcome is not None:
+                    raise outcome
+                return
+
+    @staticmethod
+    async def _async_capture_control_outcome(
+        operation: Callable[[], Awaitable[None]],
+    ) -> Exception | asyncio.CancelledError | None:
+        """Return one physical attempt's outcome for its durable owner to classify."""
+        try:
+            await operation()
+        except asyncio.CancelledError as exc:
+            return exc
+        except Exception as exc:  # noqa: BLE001 -- owner classifies every SDK escape
+            return exc
+        return None
 
     async def _async_reconcile_control_locked(
         self,
@@ -658,13 +715,19 @@ class TtlockBleConnection:
             if self._pending_client is not None:
                 msg = "Cannot create a second TTLock BLE candidate"
                 raise RuntimeError(msg)
+            self._next_client_generation += 1
+            generation = self._next_client_generation
             client = TtlockBleClient.from_ble_device(
                 candidate.device,
                 self._key,
-                disconnected_callback=self._on_disconnected,
+                disconnected_callback=partial(
+                    self._on_disconnected,
+                    generation=generation,
+                ),
                 connect_attempts=connect_attempts,
             )
             self._pending_client = client
+            self._owned_client_generation = generation
             client.set_control_allowed(self._control_is_allowed)
             connect_started = monotonic()
             age = (
@@ -913,6 +976,7 @@ class TtlockBleConnection:
             self._cleanup_task_client = None
         if cleanup.succeeded and self._pending_client is client:
             self._pending_client = None
+            self._owned_client_generation = None
             self._broadcast_connection_state(connected=False)
         if interrupted is not None:
             raise interrupted
@@ -1353,7 +1417,12 @@ class TtlockBleConnection:
             event,
         )
 
-    def _on_disconnected(self, _client: BleakClient) -> None:
+    def _on_disconnected(
+        self,
+        _client: BleakClient,
+        *,
+        generation: int | None = None,
+    ) -> None:
         """
         Wake the maintain loop the moment bleak signals a drop.
 
@@ -1362,6 +1431,12 @@ class TtlockBleConnection:
         cooldown, so the connectivity sensor claimed a live link for
         most of every cooldown cycle.
         """
+        if generation is not None and generation != self._owned_client_generation:
+            LOGGER.debug(
+                "Ignored disconnect callback from retired client for %s",
+                self._key.lockMac,
+            )
+            return
         self._disconnected.set()
         self._broadcast_connection_state(connected=False)
 
