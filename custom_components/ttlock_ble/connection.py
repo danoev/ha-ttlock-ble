@@ -655,8 +655,8 @@ class TtlockBleConnection:
                 disconnected_callback=self._on_disconnected,
                 connect_attempts=connect_attempts,
             )
-            client.set_control_allowed(self._control_is_allowed)
             self._pending_client = client
+            client.set_control_allowed(self._control_is_allowed)
             connect_started = monotonic()
             age = (
                 max(0.0, MONOTONIC_TIME() - candidate.advertisement_time)
@@ -1309,13 +1309,13 @@ class TtlockBleConnection:
         """Tear down the installed client without losing uncertain ownership."""
         if self._client is None:
             return await self._async_retry_pending_cleanup_locked(reason=reason)
-        client = self._client
-        self._client = None
-        client.remove_event_listener(self._on_event)
         if self._pending_client is not None:
             msg = "Cannot tear down an installed client while another client is pending"
             raise RuntimeError(msg)
+        client = self._client
         self._pending_client = client
+        self._client = None
+        client.remove_event_listener(self._on_event)
         cleanup = await self._async_cleanup_candidate(client, reason=reason)
         return cleanup.succeeded
 
