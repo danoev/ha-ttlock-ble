@@ -46,8 +46,8 @@ async def test_shutdown_before_authentication_aborts_without_control(
     client = TtlockBleClient(
         sample_virtual_key,
         device=MagicMock(),
-        control_allowed=lambda: False,
     )
+    client.set_control_allowed(lambda: False)
     client._check_user_time = AsyncMock(return_value=123)
     client._control_lock = AsyncMock()
 
@@ -70,8 +70,8 @@ async def test_shutdown_during_authentication_aborts_before_control(
     client = TtlockBleClient(
         sample_virtual_key,
         device=MagicMock(),
-        control_allowed=lambda: allowed,
     )
+    client.set_control_allowed(lambda: allowed)
 
     async def _authenticate() -> int:
         auth_started.set()
@@ -104,8 +104,8 @@ async def test_shutdown_after_control_begins_does_not_cancel_or_resend(
     client = TtlockBleClient(
         sample_virtual_key,
         device=MagicMock(),
-        control_allowed=lambda: allowed,
     )
+    client.set_control_allowed(lambda: allowed)
     client._check_user_time = AsyncMock(return_value=123)
 
     async def _control_once(*_args) -> None:

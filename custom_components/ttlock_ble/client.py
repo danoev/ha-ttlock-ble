@@ -64,6 +64,17 @@ class ControlOutcomeUnknownError(TTLockError):
         )
 
 
+class ControlAbortedForShutdownError(TTLockError):
+    """Physical control was safely stopped before its first control write."""
+
+    def __init__(self, action: str, *, boundary: str) -> None:
+        """Describe a credential-free, known pre-control shutdown outcome."""
+        super().__init__(
+            f"{action} aborted because Home Assistant is shutting down {boundary}; "
+            "no control command was sent"
+        )
+
+
 class TtlockBleClient(TTLockClient):
     """
     TTLock client that distinguishes pre-write failure from lost acknowledgement.
@@ -86,6 +97,7 @@ class TtlockBleClient(TTLockClient):
     ) -> None:
         """Configure command-stage tracking around the SDK client."""
         self._ha_disconnected_callback = disconnected_callback
+        self._ha_control_allowed: Callable[[], bool] | None = None
         self._ha_control_opcode: int | None = None
         self._ha_control_stage = ControlStage.BEFORE_AUTH
         self._ha_control_frame_written = False
@@ -126,6 +138,10 @@ class TtlockBleClient(TTLockClient):
         """Return the latest safe explicit-control milestone."""
         return self._ha_control_stage
 
+    def set_control_allowed(self, control_allowed: Callable[[], bool]) -> None:
+        """Install the owning integration's synchronous pre-control gate."""
+        self._ha_control_allowed = control_allowed
+
     async def unlock(self) -> None:
         """Unlock once, retaining an ambiguous post-write outcome."""
         await self._ha_run_control(cmd.CMD_UNLOCK, "unlock")
@@ -143,6 +159,10 @@ class TtlockBleClient(TTLockClient):
         )
         try:
             async with self._command_lock:
+                self._ha_require_control_allowed(
+                    action,
+                    boundary="before authentication",
+                )
                 try:
                     ps_from_lock = await self._check_user_time()
                 except Exception:
@@ -156,6 +176,7 @@ class TtlockBleClient(TTLockClient):
                 LOGGER.debug(
                     "Control stage for %s: %s", self.key.lockMac, self._ha_control_stage
                 )
+                self._ha_require_control_allowed(action, boundary="before control")
                 try:
                     await self._control_lock(opcode, ps_from_lock, action)
                 except TTLockError as exc:
@@ -202,6 +223,20 @@ class TtlockBleClient(TTLockClient):
             self._restart_keep_alive()
         finally:
             self._ha_control_active = False
+
+    def _ha_require_control_allowed(self, action: str, *, boundary: str) -> None:
+        """Abort at a known pre-control boundary when config-entry shutdown won."""
+        if self._ha_control_allowed is None or self._ha_control_allowed():
+            return
+        LOGGER.debug(
+            "Control stopped for %s before physical write "
+            "(action=%s, stage=%s, boundary=%s)",
+            self.key.lockMac,
+            action,
+            self._ha_control_stage,
+            boundary,
+        )
+        raise ControlAbortedForShutdownError(action, boundary=boundary)
 
     def _ha_reset_control_tracking(self, opcode: int) -> None:
         """Reset non-secret diagnostics for one explicit operation."""

@@ -1081,6 +1081,7 @@ async def test_one_absolute_deadline_clips_cached_scan_and_fresh_phases(
     async def _time_out_connect(_client, *, phase_timeout, **_kwargs):
         connect_windows.append(phase_timeout)
         clock[0] += phase_timeout
+        conn._pending_client = None
         return SimpleNamespace(
             acquisition_elapsed=phase_timeout,
             cleanup=SimpleNamespace(elapsed=0.0, succeeded=True),
@@ -1865,6 +1866,7 @@ async def test_second_cancellation_cannot_orphan_candidate_cleanup(
     operation.cancel()
     await asyncio.wait_for(cleanup_started.wait(), timeout=1)
     operation.cancel()
+    operation.cancel()
     await asyncio.sleep(0)
 
     assert operation.done() is False
@@ -1973,10 +1975,11 @@ async def test_shutdown_before_live_command_authentication_aborts_control(
     client = TtlockBleClient(
         sample_virtual_key,
         device=MagicMock(),
-        control_allowed=lambda: not conn._closing_event.is_set(),
     )
+    client.set_control_allowed(lambda: not conn._closing_event.is_set())
     client._client = MagicMock(is_connected=True)
     client.disconnect = AsyncMock(return_value=None)
+    client._restart_keep_alive = MagicMock()
     client._check_user_time = AsyncMock(return_value=123)
     client._control_lock = AsyncMock()
     conn._client = client
@@ -2004,8 +2007,8 @@ async def test_shutdown_during_live_authentication_aborts_before_control(
     client = TtlockBleClient(
         sample_virtual_key,
         device=MagicMock(),
-        control_allowed=lambda: not conn._closing_event.is_set(),
     )
+    client.set_control_allowed(lambda: not conn._closing_event.is_set())
     client._client = MagicMock(is_connected=True)
     client.disconnect = AsyncMock(return_value=None)
 
@@ -2057,10 +2060,11 @@ async def test_shutdown_after_control_begins_waits_without_resend(
     client = TtlockBleClient(
         sample_virtual_key,
         device=MagicMock(),
-        control_allowed=lambda: not conn._closing_event.is_set(),
     )
+    client.set_control_allowed(lambda: not conn._closing_event.is_set())
     client._client = MagicMock(is_connected=True)
     client.disconnect = AsyncMock(return_value=None)
+    client._restart_keep_alive = MagicMock()
     client.query_state = AsyncMock(return_value=(expected_state, 80))
     client._check_user_time = AsyncMock(return_value=123)
 
@@ -2309,7 +2313,7 @@ async def test_event_listener_dispatches_to_signal(
     assert received == [pushed]
 
 
-async def test_disconnect_swallows_exceptions(
+async def test_disconnect_failure_retains_connected_client(
     hass,
     sample_virtual_key,
     mock_ble_resolver,
@@ -2319,7 +2323,9 @@ async def test_disconnect_swallows_exceptions(
     conn = TtlockBleConnection(hass, sample_virtual_key)
     await conn.async_query_state()
     await conn.async_stop()
-    assert conn.is_connected is False
+    assert conn.is_connected is True
+    assert conn._client is None
+    assert conn._pending_client is mock_ttlock_client
 
 
 async def test_async_start_creates_task(

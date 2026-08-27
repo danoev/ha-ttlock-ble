@@ -163,6 +163,9 @@ class TtlockBleConnection:
         self._key = key
         self._reconnect_cooldown_seconds = reconnect_cooldown_seconds
         self._client: TTLockClient | None = None
+        self._pending_client: TTLockClient | None = None
+        self._cleanup_task: asyncio.Task[_CleanupResult] | None = None
+        self._cleanup_task_client: TTLockClient | None = None
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -180,13 +183,18 @@ class TtlockBleConnection:
 
     @property
     def is_connected(self) -> bool:
-        """True iff the underlying `TTLockClient` is currently connected."""
-        return self._client is not None and self._client.is_connected
+        """True iff any client still owned by this object reports connected."""
+        owned_client = self._client or self._pending_client
+        return owned_client is not None and owned_client.is_connected
 
     @property
     def last_connection_rssi(self) -> int | None:
         """Return the RSSI of the most recently selected HA connection route."""
         return self._last_connection_rssi
+
+    def _control_is_allowed(self) -> bool:
+        """Return whether a new physical control write may still begin."""
+        return not self._closing_event.is_set()
 
     async def async_start(self, *, maintain: bool = True) -> None:
         """Start optional reconnect maintenance for this lock."""
@@ -210,7 +218,10 @@ class TtlockBleConnection:
                 await self._task
             self._task = None
         async with self._lock:
-            await self._async_disconnect_locked()
+            await self._async_disconnect_locked(reason="config-entry shutdown")
+            await self._async_retry_pending_cleanup_locked(
+                reason="config-entry shutdown retry"
+            )
 
     async def async_query_state(
         self,
@@ -534,7 +545,7 @@ class TtlockBleConnection:
             )
             return result
 
-    async def _async_ensure_connected_locked(
+    async def _async_ensure_connected_locked(  # noqa: PLR0912, PLR0915
         self,
         *,
         active_scan: bool = False,
@@ -572,6 +583,16 @@ class TtlockBleConnection:
                 reason,
             )
             return None
+        if not await self._async_retry_pending_cleanup_locked(
+            reason=f"retry retained client before {reason}"
+        ):
+            LOGGER.debug(
+                "Connection acquisition blocked for %s "
+                "(reason=%s, failure=uncertain_prior_teardown)",
+                self._key.lockMac,
+                reason,
+            )
+            return None
         if self._client is not None and self._client.is_connected:
             LOGGER.debug(
                 "Reusing live BLE connection for %s (reason=%s, elapsed=%.1fs)",
@@ -580,7 +601,16 @@ class TtlockBleConnection:
                 monotonic() - started,
             )
             return self._client
-        await self._async_disconnect_locked()
+        if not await self._async_disconnect_locked(
+            reason=f"replace disconnected client before {reason}"
+        ):
+            LOGGER.debug(
+                "Connection acquisition blocked for %s "
+                "(reason=%s, failure=installed_client_teardown_uncertain)",
+                self._key.lockMac,
+                reason,
+            )
+            return None
         (
             candidate,
             active_acquisition_attempted,
@@ -616,12 +646,17 @@ class TtlockBleConnection:
                     monotonic() - started,
                 )
                 break
+            if self._pending_client is not None:
+                msg = "Cannot create a second TTLock BLE candidate"
+                raise RuntimeError(msg)
             client = TtlockBleClient.from_ble_device(
                 candidate.device,
                 self._key,
                 disconnected_callback=self._on_disconnected,
                 connect_attempts=connect_attempts,
             )
+            client.set_control_allowed(self._control_is_allowed)
+            self._pending_client = client
             connect_started = monotonic()
             age = (
                 max(0.0, MONOTONIC_TIME() - candidate.advertisement_time)
@@ -715,7 +750,11 @@ class TtlockBleConnection:
                 if not timeout_result.cleanup.succeeded:
                     break
 
-            if not active_scan or active_acquisition_attempted:
+            if (
+                self._closing_event.is_set()
+                or not active_scan
+                or active_acquisition_attempted
+            ):
                 break
             active_acquisition_attempted = True
             LOGGER.debug(
@@ -753,6 +792,9 @@ class TtlockBleConnection:
                 reason,
             )
             return None
+        if self._pending_client is not client:
+            msg = "Connected TTLock candidate is no longer owned"
+            raise RuntimeError(msg)
         LOGGER.debug(
             "BLE connection established for %s "
             "(reason=%s, intent=%s, connect_elapsed=%.1fs, total_elapsed=%.1fs)",
@@ -763,6 +805,7 @@ class TtlockBleConnection:
             elapsed[1],
         )
         client.add_event_listener(self._on_event)
+        self._pending_client = None
         self._client = client
         self._last_connection_rssi = candidate.rssi
         self._disconnected.clear()
@@ -827,11 +870,72 @@ class TtlockBleConnection:
         *,
         reason: str,
     ) -> _CleanupResult:
-        """Await candidate teardown and report duration without masking outcomes."""
+        """Await owned teardown despite repeated caller cancellation."""
+        if self._pending_client is not client:
+            msg = "Cannot clean up an unowned TTLock BLE client"
+            raise RuntimeError(msg)
+        task = self._cleanup_task
+        if task is None:
+            task = self._hass.async_create_task(
+                self._async_disconnect_pending_client_once(client, reason=reason),
+                name=f"{DOMAIN}.cleanup.{self._key.lockMac}",
+            )
+            self._cleanup_task = task
+            self._cleanup_task_client = client
+        elif self._cleanup_task_client is not client:
+            msg = "Another TTLock BLE client teardown is already in progress"
+            raise RuntimeError(msg)
+
+        interrupted: asyncio.CancelledError | None = None
+        while True:
+            try:
+                cleanup = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    self._cleanup_task = None
+                    self._cleanup_task_client = None
+                    raise
+                if interrupted is None:
+                    interrupted = exc
+
+        if self._cleanup_task is task:
+            self._cleanup_task = None
+            self._cleanup_task_client = None
+        if cleanup.succeeded and self._pending_client is client:
+            self._pending_client = None
+            self._broadcast_connection_state(connected=False)
+        if interrupted is not None:
+            raise interrupted
+        return cleanup
+
+    async def _async_disconnect_pending_client_once(
+        self,
+        client: TTLockClient,
+        *,
+        reason: str,
+    ) -> _CleanupResult:
+        """Attempt one backend-agnostic disconnect while ownership is retained."""
         cleanup_started = monotonic()
+        if self._client_is_disconnected(client):
+            return _CleanupResult(
+                elapsed=monotonic() - cleanup_started,
+                succeeded=True,
+            )
         try:
             await client.disconnect()
         except Exception:  # noqa: BLE001 -- cleanup failure must not mask outcome
+            if self._client_is_disconnected(client):
+                LOGGER.debug(
+                    "BLE candidate cleanup raised after disconnect for %s (reason=%s)",
+                    self._key.lockMac,
+                    reason,
+                    exc_info=True,
+                )
+                return _CleanupResult(
+                    elapsed=monotonic() - cleanup_started,
+                    succeeded=True,
+                )
             LOGGER.debug(
                 "BLE candidate cleanup failed for %s (reason=%s)",
                 self._key.lockMac,
@@ -846,6 +950,22 @@ class TtlockBleConnection:
             elapsed=monotonic() - cleanup_started,
             succeeded=True,
         )
+
+    @staticmethod
+    def _client_is_disconnected(client: TTLockClient) -> bool:
+        """Use the public client abstraction as confirmation of link teardown."""
+        try:
+            return not client.is_connected
+        except Exception:  # noqa: BLE001 -- an unreadable state remains uncertain
+            return False
+
+    async def _async_retry_pending_cleanup_locked(self, *, reason: str) -> bool:
+        """Retry an uncertain teardown before allowing another BLE client."""
+        client = self._pending_client
+        if client is None:
+            return True
+        cleanup = await self._async_cleanup_candidate(client, reason=reason)
+        return cleanup.succeeded
 
     async def _async_discard_failed_setup(
         self,
@@ -1181,16 +1301,23 @@ class TtlockBleConnection:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _async_disconnect_locked(self) -> None:
-        """Tear down the BLE session if up. Caller must hold `self._lock`."""
+    async def _async_disconnect_locked(
+        self,
+        *,
+        reason: str = "connection teardown",
+    ) -> bool:
+        """Tear down the installed client without losing uncertain ownership."""
         if self._client is None:
-            return
+            return await self._async_retry_pending_cleanup_locked(reason=reason)
         client = self._client
         self._client = None
-        self._broadcast_connection_state(connected=False)
         client.remove_event_listener(self._on_event)
-        with contextlib.suppress(Exception):
-            await client.disconnect()
+        if self._pending_client is not None:
+            msg = "Cannot tear down an installed client while another client is pending"
+            raise RuntimeError(msg)
+        self._pending_client = client
+        cleanup = await self._async_cleanup_candidate(client, reason=reason)
+        return cleanup.succeeded
 
     def _broadcast_connection_state(self, *, connected: bool) -> None:
         """
