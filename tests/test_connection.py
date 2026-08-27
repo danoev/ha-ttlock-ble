@@ -2399,6 +2399,245 @@ async def test_cancelled_ambiguous_command_reconciles_with_query_only(
     mock_ttlock_client.query_state.assert_awaited_once()
 
 
+async def test_reconciliation_survives_repeated_cancellation_and_returns_success(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """One matching reconciliation stays owned through repeated cancellation."""
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+    query_cancelled = asyncio.Event()
+    unknown = ControlOutcomeUnknownError(
+        "unlock",
+        disconnected=False,
+        routed_echoes=(),
+        response_unclassified=False,
+    )
+
+    async def _query_once() -> tuple[LockState, int]:
+        query_started.set()
+        try:
+            await release_query.wait()
+        except asyncio.CancelledError:
+            query_cancelled.set()
+            raise
+        return LockState.UNLOCKED, 80
+
+    mock_ttlock_client.unlock = AsyncMock(side_effect=unknown)
+    mock_ttlock_client.query_state = AsyncMock(side_effect=_query_once)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_unlock())
+    await asyncio.wait_for(query_started.wait(), timeout=1)
+
+    operation.cancel()
+    await asyncio.sleep(0)
+    assert query_cancelled.is_set() is False
+    assert operation.done() is False
+    assert conn._lock.locked()
+    assert getattr(conn, "_reconciliation_task", None) is not None
+
+    operation.cancel()
+    await asyncio.sleep(0)
+    assert query_cancelled.is_set() is False
+    assert operation.done() is False
+    assert mock_ttlock_client.query_state.await_count == 1
+    release_query.set()
+
+    await asyncio.wait_for(operation, timeout=1)
+
+    mock_ttlock_client.unlock.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    mock_ttlock_client.query_state.assert_awaited_once()
+    assert conn._control_task is None
+    assert getattr(conn, "_reconciliation_task", None) is None
+    assert conn._lock.locked() is False
+
+
+async def test_cancelled_contradictory_reconciliation_preserves_original_unknown(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A contradictory retained query cannot replace ambiguity with cancellation."""
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+    unknown = ControlOutcomeUnknownError(
+        "unlock",
+        disconnected=False,
+        routed_echoes=(0x14,),
+        response_unclassified=False,
+    )
+
+    async def _query_once() -> tuple[LockState, int]:
+        query_started.set()
+        await release_query.wait()
+        return LockState.LOCKED, 80
+
+    mock_ttlock_client.unlock = AsyncMock(side_effect=unknown)
+    mock_ttlock_client.query_state = AsyncMock(side_effect=_query_once)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_unlock())
+    await asyncio.wait_for(query_started.wait(), timeout=1)
+    operation.cancel()
+    await asyncio.sleep(0)
+    release_query.set()
+
+    with pytest.raises(ControlOutcomeUnknownError) as error:
+        await asyncio.wait_for(operation, timeout=1)
+
+    assert error.value is unknown
+    mock_ttlock_client.unlock.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    mock_ttlock_client.query_state.assert_awaited_once()
+    assert getattr(conn, "_reconciliation_task", None) is None
+    assert conn._lock.locked() is False
+
+
+async def test_cancelled_exceptional_reconciliation_preserves_original_unknown(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A retained query failure returns the original physical ambiguity."""
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+    unknown = ControlOutcomeUnknownError(
+        "lock",
+        disconnected=False,
+        routed_echoes=(),
+        response_unclassified=True,
+    )
+
+    async def _query_once() -> tuple[LockState, int]:
+        query_started.set()
+        await release_query.wait()
+        message = "query failed"
+        raise TTLockError(message)
+
+    mock_ttlock_client.lock = AsyncMock(side_effect=unknown)
+    mock_ttlock_client.query_state = AsyncMock(side_effect=_query_once)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(query_started.wait(), timeout=1)
+    operation.cancel()
+    await asyncio.sleep(0)
+    release_query.set()
+
+    with pytest.raises(ControlOutcomeUnknownError) as error:
+        await asyncio.wait_for(operation, timeout=1)
+
+    assert error.value is unknown
+    mock_ttlock_client.lock.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_not_awaited()
+    mock_ttlock_client.query_state.assert_awaited_once()
+    assert getattr(conn, "_reconciliation_task", None) is None
+
+
+async def test_cancellation_during_fresh_reconciliation_acquisition_is_retained(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Fresh reconciliation acquisition remains owned after caller cancellation."""
+    fresh_connect_started = asyncio.Event()
+    release_fresh_connect = asyncio.Event()
+    fresh_connect_cancelled = asyncio.Event()
+    connect_count = 0
+    unknown = ControlOutcomeUnknownError(
+        "unlock",
+        disconnected=True,
+        routed_echoes=(),
+        response_unclassified=False,
+    )
+
+    async def _connect() -> None:
+        nonlocal connect_count
+        connect_count += 1
+        if connect_count == 1:
+            mock_ttlock_client.is_connected = True
+            return
+        fresh_connect_started.set()
+        try:
+            await release_fresh_connect.wait()
+        except asyncio.CancelledError:
+            fresh_connect_cancelled.set()
+            raise
+        mock_ttlock_client.is_connected = True
+
+    async def _control_once() -> None:
+        mock_ttlock_client.is_connected = False
+        raise unknown
+
+    mock_ttlock_client.connect = AsyncMock(side_effect=_connect)
+    mock_ttlock_client.unlock = AsyncMock(side_effect=_control_once)
+    mock_ttlock_client.query_state = AsyncMock(return_value=(LockState.LOCKED, 80))
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_unlock())
+    await asyncio.wait_for(fresh_connect_started.wait(), timeout=1)
+
+    operation.cancel()
+    await asyncio.sleep(0)
+    assert fresh_connect_cancelled.is_set() is False
+    assert operation.done() is False
+    assert conn._lock.locked()
+    release_fresh_connect.set()
+
+    with pytest.raises(ControlOutcomeUnknownError) as error:
+        await asyncio.wait_for(operation, timeout=1)
+
+    assert error.value is unknown
+    assert connect_count == 2
+    mock_ttlock_client.unlock.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    mock_ttlock_client.query_state.assert_awaited_once()
+    assert getattr(conn, "_reconciliation_task", None) is None
+    assert conn._lock.locked() is False
+
+
+async def test_reconciliation_completion_racing_cancellation_harvests_success(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """A done reconciliation is harvested when caller cancellation arrives."""
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+    unknown = ControlOutcomeUnknownError(
+        "lock",
+        disconnected=False,
+        routed_echoes=(),
+        response_unclassified=False,
+    )
+
+    async def _query_once() -> tuple[LockState, int]:
+        query_started.set()
+        await release_query.wait()
+        return LockState.LOCKED, 80
+
+    mock_ttlock_client.lock = AsyncMock(side_effect=unknown)
+    mock_ttlock_client.query_state = AsyncMock(side_effect=_query_once)
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(query_started.wait(), timeout=1)
+
+    release_query.set()
+    operation.cancel()
+    await asyncio.wait_for(operation, timeout=1)
+
+    mock_ttlock_client.lock.assert_awaited_once()
+    mock_ttlock_client.unlock.assert_not_awaited()
+    mock_ttlock_client.query_state.assert_awaited_once()
+    assert conn._control_task is None
+    assert getattr(conn, "_reconciliation_task", None) is None
+    assert conn._lock.locked() is False
+
+
 async def test_pre_control_cancellation_aborts_physical_task(
     hass,
     sample_virtual_key,

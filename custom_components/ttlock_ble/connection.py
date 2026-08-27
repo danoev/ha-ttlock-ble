@@ -170,6 +170,7 @@ class TtlockBleConnection:
         self._control_task: (
             asyncio.Task[Exception | asyncio.CancelledError | None] | None
         ) = None
+        self._reconciliation_task: asyncio.Task[Exception | None] | None = None
         self._next_client_generation = 0
         self._owned_client_generation: int | None = None
         self._lock = asyncio.Lock()
@@ -450,18 +451,28 @@ class TtlockBleConnection:
                     self._key.lockMac,
                     monotonic() - started,
                 )
-            except ControlOutcomeUnknownError:
-                if await self._async_reconcile_control_locked(action, client):
-                    LOGGER.info(
-                        "Explicit %s reconciled from a fresh connected state for %s "
-                        "(elapsed=%.1fs; no command retry)",
+            except ControlOutcomeUnknownError as unknown:
+                reconciliation_task = self._hass.async_create_task(
+                    self._async_capture_reconciliation_outcome(
                         action,
-                        self._key.lockMac,
-                        monotonic() - started,
-                    )
-                    return
-                await self._async_disconnect_locked()
-                raise
+                        client,
+                        unknown,
+                    ),
+                    name=f"{DOMAIN}.reconcile.{action}.{self._key.lockMac}",
+                )
+                self._reconciliation_task = reconciliation_task
+                await self._async_await_reconciliation_task_locked(
+                    reconciliation_task,
+                    unknown,
+                )
+                LOGGER.info(
+                    "Explicit %s reconciled from a fresh connected state for %s "
+                    "(elapsed=%.1fs; no command retry)",
+                    action,
+                    self._key.lockMac,
+                    monotonic() - started,
+                )
+                return
             except TTLockError:
                 await self._async_disconnect_locked()
                 raise
@@ -476,6 +487,11 @@ class TtlockBleConnection:
             finally:
                 if self._control_task is not None and self._control_task.done():
                     self._control_task = None
+                if (
+                    self._reconciliation_task is not None
+                    and self._reconciliation_task.done()
+                ):
+                    self._reconciliation_task = None
 
     async def _async_await_control_task_locked(
         self,
@@ -518,6 +534,62 @@ class TtlockBleConnection:
         except Exception as exc:  # noqa: BLE001 -- owner classifies every SDK escape
             return exc
         return None
+
+    async def _async_await_reconciliation_task_locked(
+        self,
+        task: asyncio.Task[Exception | None],
+        unknown: ControlOutcomeUnknownError,
+    ) -> None:
+        """Retain one ambiguity resolution despite repeated caller cancellation."""
+        while True:
+            try:
+                outcome = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.done():
+                    LOGGER.debug(
+                        "Caller cancellation retained control reconciliation for %s",
+                        self._key.lockMac,
+                    )
+                    continue
+                if task.cancelled():
+                    raise unknown from None
+                outcome = task.result()
+            if outcome is not None:
+                raise outcome from None
+            return
+
+    async def _async_capture_reconciliation_outcome(
+        self,
+        action: str,
+        client: TTLockClient,
+        unknown: ControlOutcomeUnknownError,
+    ) -> Exception | None:
+        """Resolve one ambiguity or return its original error after owned cleanup."""
+        try:
+            if await self._async_reconcile_control_locked(action, client):
+                return None
+        except asyncio.CancelledError:
+            LOGGER.debug(
+                "Control reconciliation was cancelled internally for %s",
+                self._key.lockMac,
+            )
+        except Exception:  # noqa: BLE001 -- original ambiguity remains authoritative
+            LOGGER.warning(
+                "Control reconciliation failed unexpectedly for %s",
+                self._key.lockMac,
+                exc_info=True,
+            )
+        try:
+            await self._async_disconnect_locked()
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 -- retained ownership remains in connection
+            LOGGER.warning(
+                "Control reconciliation cleanup failed for %s",
+                self._key.lockMac,
+                exc_info=True,
+            )
+        return unknown
 
     async def _async_reconcile_control_locked(
         self,
