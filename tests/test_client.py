@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,7 @@ from ttlock_ble.crypto import aes_encrypt
 from ttlock_ble.protocol import Frame
 
 from custom_components.ttlock_ble.client import (
+    ControlAbortedForShutdownError,
     ControlOutcomeUnknownError,
     ControlStage,
     TtlockBleClient,
@@ -35,6 +37,92 @@ async def test_authentication_timeout_is_a_known_pre_command_failure(
 
     assert not isinstance(error.value, ControlOutcomeUnknownError)
     client._control_lock.assert_not_awaited()
+
+
+async def test_shutdown_before_authentication_aborts_without_control(
+    sample_virtual_key,
+) -> None:
+    """A visible shutdown request prevents the authentication exchange."""
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+        control_allowed=lambda: False,
+    )
+    client._check_user_time = AsyncMock(return_value=123)
+    client._control_lock = AsyncMock()
+
+    with pytest.raises(ControlAbortedForShutdownError, match="shutting down"):
+        await client.lock()
+
+    client._check_user_time.assert_not_awaited()
+    client._control_lock.assert_not_awaited()
+    assert client.control_stage is ControlStage.BEFORE_AUTH
+    assert client._ha_control_frame_written is False
+
+
+async def test_shutdown_during_authentication_aborts_before_control(
+    sample_virtual_key,
+) -> None:
+    """Shutdown may let authentication unwind but cannot start physical control."""
+    allowed = True
+    auth_started = asyncio.Event()
+    release_auth = asyncio.Event()
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+        control_allowed=lambda: allowed,
+    )
+
+    async def _authenticate() -> int:
+        auth_started.set()
+        await release_auth.wait()
+        return 123
+
+    client._check_user_time = AsyncMock(side_effect=_authenticate)
+    client._control_lock = AsyncMock()
+    operation = asyncio.create_task(client.unlock())
+    await asyncio.wait_for(auth_started.wait(), timeout=1)
+
+    allowed = False
+    release_auth.set()
+    with pytest.raises(ControlAbortedForShutdownError, match="before control"):
+        await operation
+
+    client._check_user_time.assert_awaited_once()
+    client._control_lock.assert_not_awaited()
+    assert client.control_stage is ControlStage.AUTHENTICATED
+    assert client._ha_control_frame_written is False
+
+
+async def test_shutdown_after_control_begins_does_not_cancel_or_resend(
+    sample_virtual_key,
+) -> None:
+    """Once control begins, closing cannot turn the command into a retry."""
+    allowed = True
+    control_started = asyncio.Event()
+    release_control = asyncio.Event()
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+        control_allowed=lambda: allowed,
+    )
+    client._check_user_time = AsyncMock(return_value=123)
+
+    async def _control_once(*_args) -> None:
+        client._ha_control_stage = ControlStage.CONTROL_WRITE_STARTED
+        control_started.set()
+        await release_control.wait()
+
+    client._control_lock = AsyncMock(side_effect=_control_once)
+    operation = asyncio.create_task(client.lock())
+    await asyncio.wait_for(control_started.wait(), timeout=1)
+
+    allowed = False
+    release_control.set()
+    await operation
+
+    client._control_lock.assert_awaited_once()
+    assert client.control_stage is ControlStage.CONTROL_ACKNOWLEDGED
 
 
 async def test_timeout_before_control_write_remains_a_known_failure(

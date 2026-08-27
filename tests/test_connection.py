@@ -15,7 +15,12 @@ from homeassistant.components.bluetooth import (
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from ttlock_ble import KeyboardPwdType, LockEvent, LockState, TTLockClient, TTLockError
 
-from custom_components.ttlock_ble.client import ControlOutcomeUnknownError
+from custom_components.ttlock_ble.client import (
+    ControlAbortedForShutdownError,
+    ControlOutcomeUnknownError,
+    ControlStage,
+    TtlockBleClient,
+)
 from custom_components.ttlock_ble.connection import (
     AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS,
     CACHED_CONNECT_TIMEOUT_SECONDS,
@@ -830,6 +835,32 @@ async def test_cached_deadline_awaits_cleanup_before_one_fresh_fallback(
     assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
 
 
+async def test_closing_after_cached_cleanup_prevents_active_fallback(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Shutdown winning after cached cleanup starts no new scan or GATT route."""
+    mock_ttlock_client.connect.side_effect = TTLockError("cached route failed")
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    async def _disconnect_and_close() -> None:
+        conn._closing = True
+        conn._closing_event.set()
+
+    mock_ttlock_client.disconnect.side_effect = _disconnect_and_close
+
+    with pytest.raises(TTLockError, match="not reachable"):
+        await conn.async_lock()
+
+    mock_active_scan.assert_not_awaited()
+    mock_ble_resolver.clear_advertisement_history.assert_not_called()
+    mock_ttlock_client.connect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+
+
 async def test_cached_timeout_cleanup_failure_stops_before_fresh_fallback(
     hass,
     sample_virtual_key,
@@ -855,6 +886,140 @@ async def test_cached_timeout_cleanup_failure_stops_before_fresh_fallback(
     mock_ttlock_client.disconnect.assert_awaited_once()
     mock_active_scan.assert_not_awaited()
     mock_ttlock_client.lock.assert_not_awaited()
+
+
+async def test_failed_candidate_teardown_blocks_later_acquisition_until_clean(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """A failed candidate stays owned across services until teardown succeeds."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    stale_client = mock_ttlock_client
+    stale_client.connect.side_effect = TTLockError("stale route")
+    stale_client.disconnect.side_effect = [
+        BleakError("disconnect failed once"),
+        BleakError("disconnect failed twice"),
+        None,
+    ]
+    fresh_client = MagicMock(name="FreshClient", is_connected=True)
+    fresh_client.connect = AsyncMock(return_value=None)
+    fresh_client.disconnect = AsyncMock(return_value=None)
+    fresh_client.lock = AsyncMock(return_value=None)
+    fresh_client.add_event_listener = MagicMock()
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        stale_client,
+        fresh_client,
+    ]
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+
+    with pytest.raises(TTLockError, match="not reachable"):
+        await conn.async_lock()
+    assert conn._pending_client is stale_client
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 1
+    mock_active_scan.assert_not_awaited()
+
+    with pytest.raises(TTLockError, match="not reachable"):
+        await conn.async_lock()
+    assert conn._pending_client is stale_client
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 1
+    mock_active_scan.assert_not_awaited()
+
+    await conn.async_lock()
+
+    assert conn._pending_client is None
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
+    stale_client.disconnect.assert_awaited()
+    assert stale_client.disconnect.await_count == 3
+    fresh_client.connect.assert_awaited_once()
+    fresh_client.lock.assert_awaited_once()
+
+
+async def test_installed_disconnect_failure_retains_ownership_and_broadcast(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+) -> None:
+    """Failed installed teardown cannot publish down or permit a replacement."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    states: list[bool] = []
+    async_dispatcher_connect(
+        hass,
+        connection_signal(sample_virtual_key.lockMac),
+        states.append,
+    )
+    installed = MagicMock(name="InstalledClient", is_connected=True)
+    installed.query_state = AsyncMock(side_effect=BleakError("query failed"))
+    installed.disconnect = AsyncMock(
+        side_effect=[
+            BleakError("disconnect failed once"),
+            BleakError("disconnect failed twice"),
+            None,
+        ]
+    )
+    installed.remove_event_listener = MagicMock()
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._client = installed
+    conn._broadcast_connection_state(connected=True)
+
+    assert await conn.async_query_state() is None
+    assert conn._client is None
+    assert conn._pending_client is installed
+    assert conn.is_connected is True
+    assert states == [True]
+
+    assert await conn.async_query_state() is None
+    assert conn._pending_client is installed
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 0
+    assert states == [True]
+
+    assert await conn.async_query_state() == (0, 80)
+    assert conn._pending_client is None
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 1
+    assert states == [True, False, True]
+
+
+async def test_failed_disconnect_reports_down_only_after_backend_disconnect(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A teardown exception is not itself proof of a disconnected BLE link."""
+    states: list[bool] = []
+    async_dispatcher_connect(
+        hass,
+        connection_signal(sample_virtual_key.lockMac),
+        states.append,
+    )
+    installed = MagicMock(name="InstalledClient", is_connected=True)
+    installed.disconnect = AsyncMock(side_effect=BleakError("still connected"))
+    installed.remove_event_listener = MagicMock()
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._client = installed
+    conn._broadcast_connection_state(connected=True)
+
+    async with conn._lock:
+        assert await conn._async_disconnect_locked() is False
+
+    assert conn._pending_client is installed
+    assert states == [True]
+
+    installed.is_connected = False
+    conn._on_disconnected(MagicMock())
+    async with conn._lock:
+        assert (
+            await conn._async_retry_pending_cleanup_locked(
+                reason="test confirmed disconnect"
+            )
+            is True
+        )
+
+    assert conn._pending_client is None
+    assert states == [True, False]
 
 
 async def test_fresh_route_deadline_terminates_without_second_acquisition(
@@ -1659,6 +1824,115 @@ async def test_cancelling_during_gatt_connect_disconnects_partial_client(
     assert conn._client is None
 
 
+async def test_second_cancellation_cannot_orphan_candidate_cleanup(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Repeated cancellation waits for owned teardown before propagating."""
+    from custom_components.ttlock_ble import connection as connection_module
+
+    connect_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def _connect() -> None:
+        connect_started.set()
+        await asyncio.Future()
+
+    async def _disconnect() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    stale_client = mock_ttlock_client
+    stale_client.connect.side_effect = _connect
+    stale_client.disconnect.side_effect = _disconnect
+    fresh_client = MagicMock(name="FreshClient", is_connected=True)
+    fresh_client.connect = AsyncMock(return_value=None)
+    fresh_client.disconnect = AsyncMock(return_value=None)
+    fresh_client.lock = AsyncMock(return_value=None)
+    fresh_client.add_event_listener = MagicMock()
+    connection_module.TtlockBleClient.from_ble_device.side_effect = [
+        stale_client,
+        fresh_client,
+    ]
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(connect_started.wait(), timeout=1)
+
+    operation.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    operation.cancel()
+    await asyncio.sleep(0)
+
+    assert operation.done() is False
+    assert conn._pending_client is stale_client
+    assert conn._cleanup_task is not None
+    mock_active_scan.assert_not_awaited()
+
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+    assert conn._pending_client is None
+    assert conn._cleanup_task is None
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 1
+    mock_active_scan.assert_not_awaited()
+
+    await conn.async_lock()
+    assert connection_module.TtlockBleClient.from_ble_device.call_count == 2
+    fresh_client.lock.assert_awaited_once()
+
+
+async def test_maintenance_timeout_cleanup_survives_async_stop_cancellation(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    """Unload waits for maintenance teardown even after cancelling its caller."""
+    connect_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def _connect() -> None:
+        connect_started.set()
+        await asyncio.Future()
+
+    async def _disconnect() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    mock_ttlock_client.connect.side_effect = _connect
+    mock_ttlock_client.disconnect.side_effect = _disconnect
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    with patch(
+        "custom_components.ttlock_ble.connection.CACHED_CONNECT_TIMEOUT_SECONDS",
+        0.02,
+    ):
+        await conn.async_start()
+        await asyncio.wait_for(connect_started.wait(), timeout=1)
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        stopping = asyncio.create_task(conn.async_stop())
+        await asyncio.sleep(0)
+
+        assert stopping.done() is False
+        assert conn._pending_client is mock_ttlock_client
+        assert conn._cleanup_task is not None
+        mock_active_scan.assert_not_awaited()
+
+        release_cleanup.set()
+        await asyncio.wait_for(stopping, timeout=1)
+
+    assert conn._pending_client is None
+    assert conn._cleanup_task is None
+    assert conn._task is None
+    mock_ttlock_client.disconnect.assert_awaited_once()
+
+
 async def test_unload_during_gatt_connect_discards_late_connection(
     hass,
     sample_virtual_key,
@@ -1688,6 +1962,137 @@ async def test_unload_during_gatt_connect_discards_late_connection(
     mock_ttlock_client.disconnect.assert_awaited_once()
     mock_ttlock_client.unlock.assert_not_awaited()
     assert conn._client is None
+
+
+async def test_shutdown_before_live_command_authentication_aborts_control(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """A command queued after closing cannot authenticate on a retained live link."""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+        control_allowed=lambda: not conn._closing_event.is_set(),
+    )
+    client._client = MagicMock(is_connected=True)
+    client.disconnect = AsyncMock(return_value=None)
+    client._check_user_time = AsyncMock(return_value=123)
+    client._control_lock = AsyncMock()
+    conn._client = client
+    conn._broadcast_connection_state(connected=True)
+    conn._closing = True
+    conn._closing_event.set()
+
+    with pytest.raises(TTLockError, match="not reachable"):
+        await conn.async_lock()
+
+    client._check_user_time.assert_not_awaited()
+    client._control_lock.assert_not_awaited()
+    assert client._ha_control_frame_written is False
+    await conn.async_stop()
+
+
+async def test_shutdown_during_live_authentication_aborts_before_control(
+    hass,
+    sample_virtual_key,
+) -> None:
+    """Unload waits for auth to unwind, then the pre-control gate aborts safely."""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    auth_started = asyncio.Event()
+    release_auth = asyncio.Event()
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+        control_allowed=lambda: not conn._closing_event.is_set(),
+    )
+    client._client = MagicMock(is_connected=True)
+    client.disconnect = AsyncMock(return_value=None)
+
+    async def _authenticate() -> int:
+        auth_started.set()
+        await release_auth.wait()
+        return 123
+
+    client._check_user_time = AsyncMock(side_effect=_authenticate)
+    client._control_lock = AsyncMock()
+    conn._client = client
+    conn._broadcast_connection_state(connected=True)
+    operation = asyncio.create_task(conn.async_lock())
+    await asyncio.wait_for(auth_started.wait(), timeout=1)
+
+    stopping = asyncio.create_task(conn.async_stop())
+    await asyncio.wait_for(conn._closing_event.wait(), timeout=1)
+    assert stopping.done() is False
+    release_auth.set()
+
+    with pytest.raises(ControlAbortedForShutdownError, match="before control"):
+        await operation
+    await asyncio.wait_for(stopping, timeout=1)
+
+    client._control_lock.assert_not_awaited()
+    assert client._ha_control_frame_written is False
+    client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("action", "ambiguous", "expected_state"),
+    [
+        ("lock", False, LockState.LOCKED),
+        ("unlock", True, LockState.UNLOCKED),
+    ],
+)
+async def test_shutdown_after_control_begins_waits_without_resend(
+    hass,
+    sample_virtual_key,
+    *,
+    action: str,
+    ambiguous: bool,
+    expected_state: LockState,
+) -> None:
+    """Unload cannot cancel or duplicate control after its ambiguity boundary."""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    control_started = asyncio.Event()
+    release_control = asyncio.Event()
+    client = TtlockBleClient(
+        sample_virtual_key,
+        device=MagicMock(),
+        control_allowed=lambda: not conn._closing_event.is_set(),
+    )
+    client._client = MagicMock(is_connected=True)
+    client.disconnect = AsyncMock(return_value=None)
+    client.query_state = AsyncMock(return_value=(expected_state, 80))
+    client._check_user_time = AsyncMock(return_value=123)
+
+    async def _control_once(*_args) -> None:
+        client._ha_control_stage = ControlStage.CONTROL_FRAME_WRITTEN
+        client._ha_control_frame_written = True
+        control_started.set()
+        await release_control.wait()
+        if ambiguous:
+            message = "acknowledgement lost"
+            raise TTLockError(message)
+
+    client._control_lock = AsyncMock(side_effect=_control_once)
+    conn._client = client
+    conn._broadcast_connection_state(connected=True)
+    operation = asyncio.create_task(getattr(conn, f"async_{action}")())
+    await asyncio.wait_for(control_started.wait(), timeout=1)
+
+    stopping = asyncio.create_task(conn.async_stop())
+    await asyncio.wait_for(conn._closing_event.wait(), timeout=1)
+    assert stopping.done() is False
+    release_control.set()
+
+    await operation
+    await asyncio.wait_for(stopping, timeout=1)
+
+    client._control_lock.assert_awaited_once()
+    if ambiguous:
+        client.query_state.assert_awaited_once()
+    else:
+        client.query_state.assert_not_awaited()
+    client.disconnect.assert_awaited_once()
 
 
 async def test_unlock_happy(
