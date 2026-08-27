@@ -72,8 +72,9 @@ async def test_battery_sensor_updates_from_push_event(
     hass,
     setup_integration,
     sample_virtual_key,
+    mock_ttlock_connection,
 ) -> None:
-    """A push event carrying `battery` updates the sensor without polling."""
+    """A push battery survives when the companion query returns no reading."""
     from homeassistant.helpers.dispatcher import async_dispatcher_send
     from ttlock_ble import LockEvent
 
@@ -81,6 +82,7 @@ async def test_battery_sensor_updates_from_push_event(
 
     state = hass.states.async_all("sensor")[0]
     assert state.state == "80"
+    mock_ttlock_connection.async_query_state = AsyncMock(return_value=None)
     pushed = LockEvent.from_payload(0x14, 1, bytes.fromhex("2a0102"))  # battery=0x2a
     async_dispatcher_send(
         hass,
