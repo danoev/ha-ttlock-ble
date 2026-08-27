@@ -2322,7 +2322,8 @@ async def test_disconnect_failure_retains_connected_client(
     mock_ttlock_client.disconnect = AsyncMock(side_effect=RuntimeError("boom"))
     conn = TtlockBleConnection(hass, sample_virtual_key)
     await conn.async_query_state()
-    await conn.async_stop()
+    with pytest.raises(TTLockError, match="Could not confirm BLE disconnect"):
+        await conn.async_stop()
     assert conn.is_connected is True
     assert conn._client is None
     assert conn._pending_client is mock_ttlock_client

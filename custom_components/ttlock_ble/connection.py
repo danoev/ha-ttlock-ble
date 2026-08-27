@@ -218,10 +218,19 @@ class TtlockBleConnection:
                 await self._task
             self._task = None
         async with self._lock:
-            await self._async_disconnect_locked(reason="config-entry shutdown")
-            await self._async_retry_pending_cleanup_locked(
-                reason="config-entry shutdown retry"
+            disconnected = await self._async_disconnect_locked(
+                reason="config-entry shutdown"
             )
+            if not disconnected:
+                disconnected = await self._async_retry_pending_cleanup_locked(
+                    reason="config-entry shutdown retry"
+                )
+            if not disconnected:
+                msg = (
+                    f"Could not confirm BLE disconnect for lock {self._key.lockMac} "
+                    "during shutdown"
+                )
+                raise TTLockError(msg)
 
     async def async_query_state(
         self,
