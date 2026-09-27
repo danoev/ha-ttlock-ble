@@ -18,11 +18,13 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock/unlock, authoritative state queries, passive battery updates, and operation-log reconciliation use BLE without a cloud round-trip on every operation. This fork uses the maintained sibling SDK fork [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble), based on and preserving credit to [`roquerodrigo/ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc10` is a hardware-validation prerelease, not a
-> production-certified release. It pins an immutable commit of the maintained
-> SDK fork to provide a one-attempt speculative cached route, then retains
-> RC9's one-shot fresh-route acquisition and robust GATT policy. Follow the
-> staged [real-lock checklist](docs/HARDWARE_VALIDATION.md). Passage mode and
+> Version `3.5.1rc12` is a corrective candidate awaiting prerelease publication
+> and hardware validation. It preserves bounded acquisition and single-send
+> control, adds per-lock authority ordering and explicit cleanup evidence,
+> redacts SDK diagnostics, and enforces release-version consistency. Hardware
+> testing must use the actual GitHub prerelease through HACS; do not install
+> a local ZIP or substitute a local SDK. See the
+> [RC12 validation handoff](docs/PRERELEASE_3.5.1RC12.md). Passage mode and
 > further credential work remain excluded.
 
 ## Features
@@ -71,7 +73,7 @@ The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `p
 
 ## Installation
 
-1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled; select `v3.5.1rc10` from the version list. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
+1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled; after the RC12 GitHub prerelease is published, select `v3.5.1rc12` from the version list. Until then, RC12 is not available for HACS hardware testing. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
 2. Restart Home Assistant.
 3. Settings → Devices & Services → Add Integration → **TTLock BLE**.
 4. Choose how the keys are obtained:

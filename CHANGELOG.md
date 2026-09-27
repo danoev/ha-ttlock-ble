@@ -6,13 +6,14 @@
 - Require explicit SDK cleanup evidence and retain pending backend ownership.
 - Redact credential-bearing SDK payload diagnostics.
 - Require matching release tag, source, project, release metadata, lock and ZIP versions.
-- Pin the isolated SDK corrective commit; its remote archive is not published yet.
+- Pin and verify the hosted immutable SDK corrective commit and its real archive hash.
 
 
 ## 3.5.1 hardware-validation development series
 
 This fork-only prerelease series preserves every published tag. **RC1 through
-RC9 are superseded for new testing; use RC10.** They remain available solely as
+RC11 remain historical checkpoints; RC12 is the current corrective candidate.
+Hardware testing awaits its actual GitHub/HACS prerelease.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease

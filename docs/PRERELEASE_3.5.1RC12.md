@@ -1,7 +1,11 @@
 # RC12 corrective candidate and validation handoff
 
-This is a local candidate, not a published release. No push, tag, release,
-merge, main update, PR modification or branch cleanup was performed.
+This document records the accepted corrective implementation. The SDK has now
+been staged remotely at its exact SHA and its real GitHub archive verified.
+Integration staging, hosted checks and safe historical tidy are recorded in the
+workspace RC12 staging report. No RC12 tag or release exists yet; main remains
+unchanged. Hardware validation must use the actual GitHub prerelease through
+HACS, never a local ZIP or SDK substitution.
 
 ## Candidate provenance
 
@@ -123,18 +127,13 @@ stale source/project/release/lock/ZIP versions, wrong tags, nested archives and
 RC11's tag/source defect. This does not rewrite RC11.
 
 Manifest, dev requirements and lock all name the final SDK SHA archive URL.
-The previous SDK archive hash was removed, not reused or fabricated for a new
-commit. `uv lock --check --offline` passes, but the new GitHub archive is not
-available until SDK publication is separately authorised. Before publication,
-fetch that exact archive, verify its source against the SDK commit, resolve its
-real archive hash into the lock and rerun validation. No unverified remote
-archive/hash is claimed here.
-
-Local testing installed a wheel built from the final SDK with no dependency
-changes. All 40 installed SDK source files match final SDK HEAD byte-for-byte.
-Wheel SHA256: `d27a7c481705db8b75ad76db0888ad29f59f5d288082d90298cefaa98030b921`.
-Runtime: HA 2026.8.0, Bleak 3.0.2, bleak-retry-connector 4.6.3,
-habluetooth 6.26.5. Isolated connector 4.7.0 tests leave those pins unchanged.
+The hosted immutable GitHub archive SHA256 is
+`f6e8e0a42204686d50890ff6d58fe76e5f476ff891b891ecdc0af58529ac7030`.
+All 78 tracked archive files match the exact SDK Git commit. uv.lock records
+that real hash; regeneration changed no other package metadata. Final staging
+validation installs directly from this hosted URL, with no editable/local SDK
+substitution. Runtime pins remain HA 2026.8.0, Bleak 3.0.2,
+bleak-retry-connector 4.6.3 and habluetooth 6.26.5.
 
 ## Validation results and exact rerun commands
 
@@ -218,9 +217,12 @@ bundle them into RC12.
 
 ## Required hardware validation next
 
-1. Install only the reviewed RC12 tree with the exact local SDK commit in a
-   controlled HA test environment. Verify HA reports 3.5.1rc12 and record HA,
-   Bleak, connector and ESPHome/proxy versions. Keep background maintenance off.
+1. After explicit publication authorisation, use the actual GitHub prerelease
+   v3.5.1rc12 and its release-workflow-generated ttlock_ble.zip. Enable prereleases
+   in the maintained fork's HACS repository, select v3.5.1rc12, install through
+   HACS and restart HA. Confirm reported version and exact hosted SDK provenance;
+   record HA, Bleak, connector and ESPHome/proxy versions. Keep background
+   maintenance off. Do not install a local ZIP, editable SDK or local wheel.
 2. Reproduce lock A's query before a newer acknowledged Unlock while slow/offline
    lock B delays the poll. After aggregation, A must remain UNLOCKED with command
    attribution. Repeat with Lock. Then physically change A and obtain a newer
@@ -242,15 +244,16 @@ bundle them into RC12.
 7. Enable SDK debug logging locally, exercise passcode/log/authentication/error
    paths with test credentials and inspect output for plaintext, hex, tokens and
    wire dumps. Retain opcode/status/size evidence without copying credentials.
-8. After separately authorised SDK hosting, fetch the exact archive, verify it,
-   restore a real archive hash, rerun all checks and the standard hosted HACS
-   action on the exact candidate. Verify a locally generated install ZIP reports
-   rc12 and contains only component-root files before any publication decision.
+8. Before separately authorised RC12 publication, verify the hosted archive hash,
+   exact-ref hosted checks and release metadata. After publication, confirm the
+   release-generated asset version/root structure and HACS installation. Retain
+   physical-lock evidence; do not promote to stable based on software tests alone.
 
 ## Readiness
 
-Local implementation is reviewable and validated. Publication readiness is NO:
-SDK hosting/archive verification and hash resolution, hosted exact-ref HACS
-validation, and real HA/proxy hardware validation remain. No hardware behavior
-or physical backend-release guarantee is claimed from mock tests. Stop here;
-publishing/merging/tagging requires a separate explicit instruction.
+Implementation is accepted and the immutable SDK dependency is hosted and
+verified. The staging report contains exact final local/remote SHAs, check run
+IDs, historical cleanup proofs and release-ready verdict. Hardware validation
+is still pending and must use the actual HACS-installable GitHub prerelease.
+No RC12 tag, GitHub Release, main merge or stable publication is authorised by
+this preparation step.
