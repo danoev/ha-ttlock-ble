@@ -10,6 +10,7 @@ from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_BACKGROUND_MAINTENANCE,
     CONF_PERMANENT_CONNECTION,
     CONF_RECONNECT_INTERVAL,
     DEFAULT_RECONNECT_INTERVAL_SECONDS,
@@ -45,6 +46,10 @@ class TtlockBleOptionsFlow(OptionsFlow):
             CONF_PERMANENT_CONNECTION,
             False,
         )
+        current_background_maintenance: bool = self.config_entry.options.get(
+            CONF_BACKGROUND_MAINTENANCE,
+            CONF_RECONNECT_INTERVAL in self.config_entry.options,
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -72,6 +77,10 @@ class TtlockBleOptionsFlow(OptionsFlow):
                             mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
+                    vol.Optional(
+                        CONF_BACKGROUND_MAINTENANCE,
+                        default=current_background_maintenance,
+                    ): selector.BooleanSelector(),
                     vol.Optional(
                         CONF_PERMANENT_CONNECTION,
                         default=current_permanent_connection,

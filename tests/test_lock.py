@@ -255,13 +255,13 @@ async def test_lock_event_triggers_state_refresh(
     mock_ttlock_connection.async_query_state.assert_awaited()
 
 
-async def test_lock_event_with_decoded_state_skips_query(
+async def test_lock_event_with_decoded_state_is_only_a_query_hint(
     hass,
     setup_integration,
     mock_ttlock_connection,
     sample_virtual_key,
 ) -> None:
-    """A push event carrying `lock_state` updates the UI without re-querying."""
+    """A decoded short-heartbeat state cannot bypass a connected state query."""
     from homeassistant.helpers.dispatcher import async_dispatcher_send
     from ttlock_ble import LockEvent
 
@@ -269,9 +269,7 @@ async def test_lock_event_with_decoded_state_skips_query(
 
     state = hass.states.async_all("lock")[0]
     assert state.state == "locked"
-    mock_ttlock_connection.async_query_state = AsyncMock(
-        side_effect=AssertionError("must not be called when lock_state is decoded")
-    )
+    mock_ttlock_connection.async_query_state = AsyncMock(return_value=(1, 80))
     async_dispatcher_send(
         hass,
         event_signal(sample_virtual_key.lockMac),
@@ -279,7 +277,7 @@ async def test_lock_event_with_decoded_state_skips_query(
     )
     await hass.async_block_till_done()
     assert hass.states.get(state.entity_id).state == "unlocked"
-    mock_ttlock_connection.async_query_state.assert_not_awaited()
+    mock_ttlock_connection.async_query_state.assert_awaited_once()
 
 
 async def test_lock_event_with_decoded_state_respects_settle_window(

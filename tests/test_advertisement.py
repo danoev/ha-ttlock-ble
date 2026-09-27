@@ -21,6 +21,7 @@ def service_info(data: dict) -> MagicMock:
     info = MagicMock(name="BluetoothServiceInfoBleak")
     info.address = MAC
     info.manufacturer_data = data
+    info.rssi = -71
     return info
 
 
@@ -51,6 +52,7 @@ async def test_register_subscribes_once_per_lock(hass, sample_virtual_key) -> No
     assert len(unsubs) == 1
     matcher = register.call_args.args[2]
     assert matcher["address"] == sample_virtual_key.lockMac
+    assert register.call_args.args[3].value == "passive"
 
 
 async def test_unlocked_advertisement_updates_the_coordinator(tracker) -> None:
@@ -61,6 +63,7 @@ async def test_unlocked_advertisement_updates_the_coordinator(tracker) -> None:
     assert mac == MAC
     assert advertisement.lock_state == 1
     assert advertisement.battery == 77
+    assert coordinator.async_apply_advertisement.call_args.kwargs == {"rssi": -71}
     coordinator.async_request_refresh.assert_not_called()
 
 

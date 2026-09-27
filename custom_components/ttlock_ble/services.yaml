@@ -1,0 +1,104 @@
+add_passcode:
+  name: Add passcode
+  description: Add a keypad passcode directly to a lock over Bluetooth.
+  fields:
+    device_id:
+      name: Device
+      description: TTLock device to update.
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    code:
+      name: Passcode
+      description: A 4-9 digit keypad passcode. The value is not retained by the integration.
+      required: true
+      selector:
+        text:
+          type: password
+    type:
+      name: Access type
+      required: true
+      selector:
+        select:
+          options:
+            - permanent
+            - period
+    start:
+      name: Starts
+      description: Required for period passcodes; interpreted in the Home Assistant time zone.
+      selector:
+        datetime:
+    end:
+      name: Ends
+      description: Required for period passcodes; interpreted in the Home Assistant time zone.
+      selector:
+        datetime:
+
+delete_passcode:
+  name: Delete passcode
+  description: Delete one keypad passcode directly from a lock over Bluetooth.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    code:
+      name: Passcode
+      required: true
+      selector:
+        text:
+          type: password
+    type:
+      name: Access type
+      required: true
+      selector:
+        select:
+          options:
+            - permanent
+            - period
+
+clear_passcodes:
+  name: Clear passcodes
+  description: Permanently remove every keypad passcode stored by the lock.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+
+get_auto_lock:
+  name: Get auto-lock delay
+  description: Read the native auto-lock delay from the lock.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+
+set_auto_lock:
+  name: Set auto-lock delay
+  description: Set the native auto-lock delay. Use zero to disable auto-lock.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    seconds:
+      name: Delay
+      description: Seconds before the lock re-locks; zero disables auto-lock.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          unit_of_measurement: s
+          mode: box

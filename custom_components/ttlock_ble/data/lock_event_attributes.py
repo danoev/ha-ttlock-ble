@@ -9,16 +9,16 @@ class TtlockBleLogEventAttributes(TypedDict):
     """
     Attributes published with a decoded operation-log event.
 
-    `credential` is the SDK's `password` field, which is only carried
-    for record types where it identifies something (a card number, a
-    fingerprint id, an accessory MAC). Record types where it is a
-    working door code never populate it — see `PASSCODE_RECORD_TYPES`.
+    The SDK's overloaded `password` field is deliberately absent. Depending
+    on record type it can be a working passcode, card number, fob address, or
+    identifier, and RC10 does not have an authoritative way to separate safe
+    labels from usable credentials.
     """
 
     record_type: str
+    method: str
     battery: int
     timestamp: NotRequired[str]
     uid: NotRequired[int]
-    credential: NotRequired[str]
     key_id: NotRequired[int]
     accessory_battery: NotRequired[int]

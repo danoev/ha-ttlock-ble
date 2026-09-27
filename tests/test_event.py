@@ -7,7 +7,11 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from ttlock_ble import LogEntry, LogOperate
 
 from custom_components.ttlock_ble.connection import log_signal
-from custom_components.ttlock_ble.event import _classify_record, _record_type_name
+from custom_components.ttlock_ble.event import (
+    _classify_record,
+    _operation_method,
+    _record_type_name,
+)
 
 
 def _log_state(hass):
@@ -22,6 +26,8 @@ def _log_state(hass):
         (LogOperate.OPERATE_BLE_LOCK, "lock"),
         (LogOperate.ERROR_PASSWORD_UNLOCK, "unlock_failed"),
         (LogOperate.KEYBOARD_MODIFY_PASSWORD, "password_change"),
+        (LogOperate.OPERATE_KEY_UNLOCK, "unlock"),
+        (LogOperate.OPERATE_KEY_LOCK, "lock"),
         (9999, "other"),
     ],
 )
@@ -35,6 +41,21 @@ def test_record_type_name_known_value() -> None:
 
 def test_record_type_name_unknown_value_falls_back_to_str() -> None:
     assert _record_type_name(9999) == "9999"
+
+
+@pytest.mark.parametrize(
+    ("record_type", "expected"),
+    [
+        (LogOperate.MOBILE_UNLOCK, "ttlock_app"),
+        (LogOperate.FR_UNLOCK_SUCCEED, "fingerprint"),
+        (LogOperate.IC_UNLOCK_SUCCEED, "ic_card"),
+        (LogOperate.KEYBOARD_PASSWORD_UNLOCK, "passcode"),
+        (LogOperate.OPERATE_KEY_UNLOCK, "physical_key"),
+        (9999, "other"),
+    ],
+)
+def test_operation_method_is_human_readable(record_type, expected) -> None:
+    assert _operation_method(record_type) == expected
 
 
 async def test_event_entity_created_for_each_key(hass, setup_integration) -> None:
@@ -67,17 +88,18 @@ async def test_log_event_fires_on_new_record(
     assert state.attributes["record_type"] == "keyboard_password_unlock"
     assert state.attributes["timestamp"] == "2026-05-17T10:00:00"
     assert state.attributes["battery"] == 85
+    assert state.attributes["method"] == "passcode"
     assert state.attributes["uid"] == 1234
     # The keypad code itself must never reach the recorder / the API.
     assert "credential" not in state.attributes
 
 
-async def test_log_event_publishes_non_secret_credentials(
+async def test_log_event_does_not_publish_overloaded_card_credential(
     hass,
     setup_integration,
     sample_virtual_key,
 ) -> None:
-    """A card number is an identifier, not a secret — it stays in the event."""
+    """The SDK card field may unlock a door, so it never reaches Recorder."""
     entry = LogEntry(
         record_number=3,
         record_type=int(LogOperate.IC_UNLOCK_SUCCEED),
@@ -87,7 +109,10 @@ async def test_log_event_publishes_non_secret_credentials(
     )
     async_dispatcher_send(hass, log_signal(sample_virtual_key.lockMac), entry)
     await hass.async_block_till_done()
-    assert _log_state(hass).attributes["credential"] == "3819472054"
+    attributes = _log_state(hass).attributes
+    assert "credential" not in attributes
+    assert "credential_id" not in attributes
+    assert attributes["method"] == "ic_card"
 
 
 async def test_log_event_redacts_every_passcode_record_type(
@@ -110,6 +135,7 @@ async def test_log_event_redacts_every_passcode_record_type(
         await hass.async_block_till_done()
         attributes = _log_state(hass).attributes
         assert "credential" not in attributes, record_type
+        assert "credential_id" not in attributes, record_type
 
 
 async def test_log_event_includes_key_id_and_accessory_battery(

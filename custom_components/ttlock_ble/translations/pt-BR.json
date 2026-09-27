@@ -100,14 +100,36 @@
         "data": {
           "scan_interval": "Intervalo de polling (segundos)",
           "reconnect_interval": "Intervalo de reconexão (segundos)",
+          "background_maintenance": "Manutenção de reconexão em segundo plano",
           "permanent_connection": "Conexão permanente"
         },
         "data_description": {
           "scan_interval": "Com que frequência o estado é lido por uma sessão BLE. Anúncios adiam a próxima leitura, então uma fechadura ao alcance raramente é consultada.",
-          "reconnect_interval": "Quanto tempo esperar depois que a fechadura derruba a sessão BLE antes de reconectar.",
+          "reconnect_interval": "Quanto tempo a manutenção opcional espera depois que a fechadura derruba a sessão BLE antes de reconectar.",
+          "background_maintenance": "Reabre sessões BLE ociosas em segundo plano. Desativado por padrão para reduzir o consumo e o tráfego; um estado inicial desconhecido ainda é tentado novamente automaticamente.",
           "permanent_connection": "Reconecta imediatamente após cada queda, mantendo a sessão sempre aberta. Ignora o intervalo de reconexão e aumenta o consumo de bateria da fechadura."
         }
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "O dispositivo TTLock selecionado não existe mais."
+    },
+    "device_not_loaded": {
+      "message": "O dispositivo TTLock selecionado não está carregado."
+    },
+    "invalid_passcode": {
+      "message": "A senha deve conter entre 4 e 9 dígitos."
+    },
+    "invalid_datetime": {
+      "message": "Informe uma data e hora válidas."
+    },
+    "period_window_required": {
+      "message": "Senhas temporárias exigem início e fim."
+    },
+    "invalid_period_window": {
+      "message": "O fim da senha deve ser posterior ao início."
     }
   },
   "entity": {

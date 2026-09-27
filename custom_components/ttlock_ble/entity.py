@@ -54,3 +54,8 @@ class TtlockBleEntity(CoordinatorEntity[TtlockBleDataUpdateCoordinator]):
         if self.coordinator.data is None:
             return None  # type: ignore[unreachable]
         return self.coordinator.data.get(self._key.lockMac)
+
+    async def async_update(self) -> None:
+        """Run an explicit active-capable authoritative entity refresh."""
+        self.coordinator.async_request_active_state_refresh(self._key.lockMac)
+        await self.coordinator.async_request_refresh()
