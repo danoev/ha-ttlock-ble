@@ -114,11 +114,9 @@ class _BlockedSdkConnect:
 
     async def establish(self, *_args, **_kwargs):
         await self.slot.acquire()
+        _kwargs["ttlock_client_created"](self.backend)
         if self.stage == "connector":
-            try:
-                await self.block()
-            finally:
-                self.slot.release()
+            await self.block()
         return self.backend
 
     async def discover(self, client) -> None:
@@ -139,6 +137,7 @@ class _BlockedSdkConnect:
             await self.block()
 
     async def disconnect_backend(self) -> None:
+        self.backend.is_connected = False
         if self.slot.locked():
             self.slot.release()
 
@@ -1020,6 +1019,8 @@ async def test_failed_disconnect_reports_down_only_after_backend_disconnect(
 
     installed.is_connected = False
     conn._on_disconnected(MagicMock())
+    # Connectivity callback evidence alone cannot retire SDK ownership.
+    installed.disconnect.side_effect = None
     async with conn._lock:
         assert (
             await conn._async_retry_pending_cleanup_locked(
@@ -3447,6 +3448,62 @@ async def test_stopped_connection_refuses_to_reconnect(
     with pytest.raises(TTLockError, match="not reachable"):
         await conn.async_lock()
     mock_ttlock_client.connect.assert_not_awaited()
+
+
+async def test_unassigned_sdk_handle_cannot_confirm_teardown_or_unload(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_active_scan,
+) -> None:
+    """A connector failure without registered ownership is explicit uncertainty."""
+    clients = []
+    original_factory = TtlockBleClient.from_ble_device
+
+    def _factory(*args, **kwargs):
+        client = original_factory(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    with (
+        patch(
+            "custom_components.ttlock_ble.connection.TtlockBleClient.from_ble_device",
+            side_effect=_factory,
+        ) as factory,
+        patch(
+            "ttlock_ble.client.establish_connection",
+            new=AsyncMock(side_effect=OSError("preflight failed")),
+        ),
+    ):
+        conn = TtlockBleConnection(hass, sample_virtual_key)
+        assert await conn.async_query_state() is None
+        assert clients[0]._client is None
+        assert clients[0].connection_cleanup_confirmed is False
+        assert conn._pending_client is clients[0]
+        assert await conn.async_query_state() is None
+        factory.assert_called_once()
+        with pytest.raises(TTLockError, match="Could not confirm BLE disconnect"):
+            await conn.async_stop()
+        assert conn._pending_client is clients[0]
+        mock_active_scan.assert_not_awaited()
+
+
+async def test_false_connected_flag_without_cleanup_evidence_blocks_replacement(
+    hass,
+    sample_virtual_key,
+    mock_ttlock_client,
+    mock_active_scan,
+) -> None:
+    mock_ttlock_client.is_connected = False
+    mock_ttlock_client.connection_cleanup_confirmed = False
+    mock_ttlock_client.disconnect = AsyncMock(side_effect=OSError("cleanup failed"))
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._pending_client = mock_ttlock_client
+
+    assert await conn.async_query_state() is None
+    assert conn._pending_client is mock_ttlock_client
+    mock_ttlock_client.connect.assert_not_awaited()
+    mock_active_scan.assert_not_awaited()
 
 
 async def test_run_command_lets_cancellation_through(

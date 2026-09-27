@@ -1098,9 +1098,9 @@ class TtlockBleConnection:
 
     @staticmethod
     def _client_is_disconnected(client: TTLockClient) -> bool:
-        """Use the public client abstraction as confirmation of link teardown."""
+        """Require the SDK's explicit cleanup evidence, not an absent handle."""
         try:
-            return not client.is_connected
+            return client.connection_cleanup_confirmed is True
         except Exception:  # noqa: BLE001 -- an unreadable state remains uncertain
             return False
 
