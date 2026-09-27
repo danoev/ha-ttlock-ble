@@ -479,10 +479,12 @@ async def test_connected_query_after_command_may_supersede_it(hass) -> None:
         source="command",
         rssi=-65,
     )
+    command_revision = coordinator.state_attribution("A").revision
     await coordinator.async_refresh()
 
     assert coordinator.data["A"] == {"locked": True, "battery_level": 75}
     assert coordinator.state_attribution("A").source == "query"
+    assert coordinator.state_attribution("A").revision > command_revision
 
 
 async def test_cancelled_aggregation_preserves_newer_command(hass) -> None:
@@ -520,4 +522,99 @@ async def test_cancelled_aggregation_preserves_newer_command(hass) -> None:
 
     assert b_cancelled.is_set()
     assert coordinator.data["A"]["locked"] is False
+    assert coordinator.state_attribution("A") is attribution
+
+
+async def test_concurrent_results_sequence_independently_at_observation(hass) -> None:
+    from unittest.mock import patch
+
+    observed_a = asyncio.Event()
+    release_b = asyncio.Event()
+    a = _mock_connection()
+    b = _mock_connection()
+
+    async def _query_a(**_kwargs):
+        observed_a.set()
+        return (1, 78)
+
+    async def _query_b(**_kwargs):
+        await release_b.wait()
+        return (0, 60)
+
+    a.async_query_state.side_effect = _query_a
+    b.async_query_state.side_effect = _query_b
+    coordinator = _coordinator(hass, {"A": a, "B": b})
+    with patch("custom_components.ttlock_ble.coordinator.monotonic", return_value=10):
+        coordinator.async_apply_authoritative_state(
+            "A",
+            locked=True,
+            battery_level=80,
+            source="command",
+            rssi=-65,
+        )
+        refresh = asyncio.create_task(coordinator.async_refresh())
+        await asyncio.wait_for(observed_a.wait(), timeout=1)
+    with patch("custom_components.ttlock_ble.coordinator.monotonic", return_value=20):
+        release_b.set()
+        await refresh
+
+    assert coordinator.state_attribution("A").revision == 2
+    assert coordinator.state_attribution("B").revision == 1
+    assert coordinator.state_attribution("A").observed_at == 10
+    assert coordinator.state_attribution("B").observed_at == 20
+
+
+async def test_hints_and_log_completion_do_not_advance_authority(hass) -> None:
+    coordinator = _coordinator(hass, {"A": _mock_connection()})
+    coordinator.async_apply_authoritative_state(
+        "A",
+        locked=False,
+        battery_level=79,
+        source="command",
+        rssi=-65,
+    )
+    attribution = coordinator.state_attribution("A")
+    coordinator.async_apply_advertisement(
+        "A",
+        _advertisement(unlocked=False),
+        rssi=-85,
+    )
+    await coordinator._async_sync_operation_log(coordinator.connections["A"])
+
+    assert coordinator.state_attribution("A") is attribution
+    assert coordinator._observation_revisions["A"] == attribution.revision
+    assert coordinator.data["A"]["locked"] is False
+
+
+async def test_newer_query_publication_beats_older_waiting_aggregation(hass) -> None:
+    observed_a = asyncio.Event()
+    release_b = asyncio.Event()
+    a = _mock_connection()
+    b = _mock_connection()
+
+    async def _query_a(**_kwargs):
+        observed_a.set()
+        return (0, 80)
+
+    async def _query_b(**_kwargs):
+        await release_b.wait()
+        return (0, 60)
+
+    a.async_query_state.side_effect = _query_a
+    b.async_query_state.side_effect = _query_b
+    coordinator = _coordinator(hass, {"A": a, "B": b})
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await asyncio.wait_for(observed_a.wait(), timeout=1)
+    coordinator.async_apply_authoritative_state(
+        "A",
+        locked=False,
+        battery_level=77,
+        source="query_after_push",
+        rssi=-66,
+    )
+    attribution = coordinator.state_attribution("A")
+    release_b.set()
+    await refresh
+
+    assert coordinator.data["A"] == {"locked": False, "battery_level": 77}
     assert coordinator.state_attribution("A") is attribution

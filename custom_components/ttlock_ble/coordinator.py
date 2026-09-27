@@ -51,6 +51,15 @@ class StateAttribution:
     source: str
     observed_at: float
     rssi: int | None
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class _StateObservation:
+    """A query result ordered when that lock answered, before aggregation."""
+
+    state: TtlockBleLockState
+    attribution: StateAttribution
 
 
 class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinatorData"]):
@@ -73,6 +82,7 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         )
         self._connections = connections
         self._state_attribution: dict[str, StateAttribution] = {}
+        self._observation_revisions: dict[str, int] = {}
         self._advertisement_hints: dict[str, LockState] = {}
         self._new_records_hints: dict[str, bool] = {}
         self._active_scan_requested: set[str] = set()
@@ -155,6 +165,23 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         """Return provenance for the latest authoritative state of ``mac``."""
         return self._state_attribution.get(mac)
 
+    def _next_attribution(
+        self,
+        mac: str,
+        *,
+        source: str,
+        rssi: int | None,
+    ) -> StateAttribution:
+        """Sequence a completed observation without an await or wall-clock ordering."""
+        revision = self._observation_revisions.get(mac, 0) + 1
+        self._observation_revisions[mac] = revision
+        return StateAttribution(
+            source=source,
+            observed_at=monotonic(),
+            rssi=rssi,
+            revision=revision,
+        )
+
     @callback
     def async_apply_authoritative_state(
         self,
@@ -173,9 +200,9 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
             if battery_level is not None
             else current.get("battery_level"),
         }
-        self._state_attribution[mac] = StateAttribution(
+        self._state_attribution[mac] = self._next_attribution(
+            mac,
             source=source,
-            observed_at=monotonic(),
             rssi=rssi,
         )
         self.async_set_updated_data({**(self.data or {}), mac: snapshot})
@@ -186,6 +213,7 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
         self._active_scan_requested.difference_update(requested)
         poll_tasks = {
             mac: self._async_poll(
+                mac,
                 connection,
                 active_scan=mac in requested or not self.async_has_state(mac),
             )
@@ -203,22 +231,24 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
                 state.setdefault(mac, {"locked": None, "battery_level": None})
                 self._async_schedule_bootstrap_retry(mac)
                 continue
+            latest = self._state_attribution.get(mac)
+            if latest is not None and result.attribution.revision <= latest.revision:
+                # A different lock's slow response must not age this query past
+                # a command or query already published for the same lock.
+                continue
+            reading = result.state
             current = state.get(mac, {})
             state[mac] = {
-                "locked": result.get("locked")
-                if result.get("locked") is not None
+                "locked": reading.get("locked")
+                if reading.get("locked") is not None
                 else current.get("locked"),
-                "battery_level": result.get("battery_level")
-                if result.get("battery_level") is not None
+                "battery_level": reading.get("battery_level")
+                if reading.get("battery_level") is not None
                 else current.get("battery_level"),
             }
-            if result.get("locked") is not None:
+            if reading.get("locked") is not None:
                 connection = self._connections[mac]
-                self._state_attribution[mac] = StateAttribution(
-                    source="query",
-                    observed_at=monotonic(),
-                    rssi=connection.last_connection_rssi,
-                )
+                self._state_attribution[mac] = result.attribution
                 self.hass.loop.call_soon(
                     self._async_schedule_operation_log,
                     connection,
@@ -265,19 +295,24 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
 
     async def _async_poll(
         self,
+        mac: str,
         connection: TtlockBleConnection,
         *,
         active_scan: bool,
-    ) -> TtlockBleLockState | None:
+    ) -> _StateObservation | None:
         """Query one lock through its persistent connection."""
         result = await connection.async_query_state(active_scan=active_scan)
         if result is None:
             return None
         raw_state, battery = result
-        return {
-            "locked": _parse_lock_state(raw_state),
-            "battery_level": battery,
-        }
+        return _StateObservation(
+            state={"locked": _parse_lock_state(raw_state), "battery_level": battery},
+            attribution=self._next_attribution(
+                mac,
+                source="query",
+                rssi=connection.last_connection_rssi,
+            ),
+        )
 
     @callback
     def _async_schedule_operation_log(
