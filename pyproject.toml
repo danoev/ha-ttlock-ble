@@ -23,7 +23,7 @@ dev = [
     "pytest-cov==7.1.0",
     "pytest-homeassistant-custom-component==0.13.354",
     "serialx==1.8.2",
-    "ttlock-ble @ https://github.com/danoev/ttlock-ble/archive/42c5e453c12cccc85531c8c74f34a1a63d106967.tar.gz",
+    "ttlock-ble @ https://github.com/danoev/ttlock-ble/archive/65a196a4415516039fd98fe40ccdccc7dccfec23.tar.gz",
 ]
 lint = [
     "ruff==0.16.1",
