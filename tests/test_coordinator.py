@@ -432,3 +432,92 @@ async def test_poll_exception_preserves_last_authoritative_state(
         "battery_level": 76,
     }
     assert coordinator.state_attribution(sample_virtual_key.lockMac).source == "query"
+
+
+async def test_slow_second_lock_cannot_age_query_past_newer_command(hass) -> None:
+    """Aggregation completion cannot change when lock A was observed."""
+    observed_a = asyncio.Event()
+    release_b = asyncio.Event()
+    a = _mock_connection()
+    b = _mock_connection()
+
+    async def _query_a(**_kwargs):
+        observed_a.set()
+        return (0, 80)
+
+    async def _query_b(**_kwargs):
+        await release_b.wait()
+        return (1, 60)
+
+    a.async_query_state.side_effect = _query_a
+    b.async_query_state.side_effect = _query_b
+    coordinator = _coordinator(hass, {"A": a, "B": b})
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await asyncio.wait_for(observed_a.wait(), timeout=1)
+    coordinator.async_apply_authoritative_state(
+        "A",
+        locked=False,
+        battery_level=79,
+        source="command",
+        rssi=-65,
+    )
+    command_attribution = coordinator.state_attribution("A")
+    release_b.set()
+    await refresh
+
+    assert coordinator.data["A"] == {"locked": False, "battery_level": 79}
+    assert coordinator.data["B"] == {"locked": False, "battery_level": 60}
+    assert coordinator.state_attribution("A") is command_attribution
+
+
+async def test_connected_query_after_command_may_supersede_it(hass) -> None:
+    coordinator = _coordinator(hass, {"A": _mock_connection(query_return=(0, 75))})
+    coordinator.async_apply_authoritative_state(
+        "A",
+        locked=False,
+        battery_level=79,
+        source="command",
+        rssi=-65,
+    )
+    await coordinator.async_refresh()
+
+    assert coordinator.data["A"] == {"locked": True, "battery_level": 75}
+    assert coordinator.state_attribution("A").source == "query"
+
+
+async def test_cancelled_aggregation_preserves_newer_command(hass) -> None:
+    observed_a = asyncio.Event()
+    b_cancelled = asyncio.Event()
+    a = _mock_connection()
+    b = _mock_connection()
+
+    async def _query_a(**_kwargs):
+        observed_a.set()
+        return (0, 80)
+
+    async def _query_b(**_kwargs):
+        try:
+            await asyncio.Future()
+        finally:
+            b_cancelled.set()
+
+    a.async_query_state.side_effect = _query_a
+    b.async_query_state.side_effect = _query_b
+    coordinator = _coordinator(hass, {"A": a, "B": b})
+    aggregation = asyncio.create_task(coordinator._async_update_data())
+    await asyncio.wait_for(observed_a.wait(), timeout=1)
+    coordinator.async_apply_authoritative_state(
+        "A",
+        locked=False,
+        battery_level=79,
+        source="command",
+        rssi=-65,
+    )
+    attribution = coordinator.state_attribution("A")
+    aggregation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await aggregation
+
+    assert b_cancelled.is_set()
+    assert coordinator.data["A"]["locked"] is False
+    assert coordinator.state_attribution("A") is attribution
