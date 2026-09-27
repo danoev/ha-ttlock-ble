@@ -1458,6 +1458,50 @@ async def test_connect_stage_deadline_cancels_before_auth_and_releases_slot(
     scenario.slot.release()
 
 
+@pytest.mark.parametrize("external_cancel", [False, True])
+async def test_suppressed_connect_cancellation_never_adopts_or_controls(
+    hass,
+    sample_virtual_key,
+    mock_ble_resolver,
+    mock_ttlock_client,
+    mock_active_scan,
+    external_cancel,
+):
+    """A backend's late normal return cannot erase deadline/caller cancellation."""
+    started = asyncio.Event()
+
+    async def _connect():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            return  # Deliberately simulate a cancellation-suppressing backend.
+
+    mock_ttlock_client.connect.side_effect = _connect
+    mock_ttlock_client._check_user_time = AsyncMock()
+    mock_active_scan.side_effect = TimeoutError
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    with patch(
+        "custom_components.ttlock_ble.connection.CACHED_CONNECT_TIMEOUT_SECONDS",
+        0.02 if not external_cancel else 60,
+    ):
+        operation = asyncio.create_task(conn.async_lock())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        if external_cancel:
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(operation, timeout=1)
+        else:
+            with pytest.raises(TTLockError, match="not reachable"):
+                await asyncio.wait_for(operation, timeout=1)
+
+    mock_ttlock_client.disconnect.assert_awaited_once()
+    mock_ttlock_client.lock.assert_not_awaited()
+    mock_ttlock_client._check_user_time.assert_not_awaited()
+    assert conn._client is None
+    assert conn._pending_client is None
+
+
 async def test_explicit_command_active_scan_uses_fresh_callback_device(
     hass,
     sample_virtual_key,

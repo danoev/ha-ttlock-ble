@@ -975,6 +975,14 @@ class TtlockBleConnection:
         try:
             async with timeout_context:
                 await client.connect()
+                # A backend may suppress cancellation and return a late link.
+                # Preserve the timeout/caller cancellation before adoption,
+                # authentication or any physical command can begin.
+                task = asyncio.current_task()
+                if timeout_context.expired() or (
+                    task is not None and task.cancelling()
+                ):
+                    raise asyncio.CancelledError  # noqa: TRY301 -- preserve timeout context handling
         except asyncio.CancelledError:
             cleanup = await self._async_cleanup_candidate(
                 client,
