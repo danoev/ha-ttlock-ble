@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.5.1rc12 (local corrective candidate)
+
+- Order authoritative state observations per lock before multi-lock aggregation.
+- Require explicit SDK cleanup evidence and retain pending backend ownership.
+- Redact credential-bearing SDK payload diagnostics.
+- Require matching release tag, source, project, release metadata, lock and ZIP versions.
+- Pin the isolated SDK corrective commit; its remote archive is not published yet.
+
+
 ## 3.5.1 hardware-validation development series
 
 This fork-only prerelease series preserves every published tag. **RC1 through
