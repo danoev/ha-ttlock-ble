@@ -34,7 +34,9 @@ Integration, in order:
 - `0dfd69b` test: enforce release version consistency
 - `0c2c507` chore: prepare 3.5.1rc12 metadata
 - `e4f0f99` chore: pin final SDK diagnostic safety commit
-- Final documentation commit: this handoff (see `git log`).
+- `0691243` docs: record RC12 validation and hardware handoff
+- `29fe6e9` fix: reject connections that suppress acquisition cancellation
+- Final documentation correction: see `git log`.
 
 SDK, in order:
 
@@ -77,6 +79,10 @@ remain pending; replacement acquisition is blocked; unload reports failure
 rather than silently dropping ownership. Existing retained cleanup tasks,
 generation callbacks, deadline cancellation/draining and committed-control
 reconciliation remain in place. Repeated cancellation tests remain enabled.
+A post-connect guard rejects a normal return if the acquisition timeout expired
+or the caller remains cancelled. Two deterministic regressions reproduced both
+unsafe late-adoption paths before the guard and pass with it; neither path can
+reach authentication/control. This changes no budget values.
 
 This is the strongest evidence available through public backend APIs. It does
 not attest to physical RF or proxy-slot release independently of the backend.
@@ -132,7 +138,9 @@ habluetooth 6.26.5. Isolated connector 4.7.0 tests leave those pins unchanged.
 
 ## Validation results and exact rerun commands
 
-Integration: 441 tests, 96.69% coverage (90% gate). SDK: 288 tests,
+Integration: the pre-guard full run passed 441 tests at 96.69% coverage; the
+final suite adds two cancellation-suppression cases (443 tests; 90% coverage gate).
+See the final handoff for its exact coverage. SDK: 288 tests,
 98.28% coverage. Ruff, format and mypy pass (38 integration/39 SDK source files).
 The ten SDK ownership tests pass with 4.6.3 and isolated 4.7.0, including actual
 connector transient retries beyond max_attempts=1 while retaining one backend.
