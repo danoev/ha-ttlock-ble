@@ -13,6 +13,8 @@ from zipfile import ZipFile
 import pytest
 from packaging.requirements import Requirement
 
+from scripts.validate_release import validate_release
+
 _ROOT = Path(__file__).resolve().parent.parent
 _SDK = "ttlock-ble"
 _HACS_ARCHIVE = "ttlock_ble.zip"
@@ -143,3 +145,118 @@ def test_hacs_install_zip_contains_only_integration_files_at_root() -> None:
         name.startswith(("custom_components/", "ttlock_ble/"))
         for name in archived_files
     )
+
+
+@pytest.fixture
+def release_tree(tmp_path):
+    component = tmp_path / "custom_components/ttlock_ble"
+    component.mkdir(parents=True)
+    (component / "manifest.json").write_text('{"version": "3.5.1rc12"}')
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "ha-ttlock-ble"\nversion = "3.5.1rc12"\n',
+    )
+    (tmp_path / ".release-please-manifest.json").write_text('{".": "3.5.1rc12"}')
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "ha-ttlock-ble"\nversion = "3.5.1rc12"\n',
+    )
+    return tmp_path
+
+
+def _release_zip(root, version="3.5.1rc12", prefix=""):
+    archive = root / _HACS_ARCHIVE
+    with ZipFile(archive, "w") as install_zip:
+        install_zip.writestr(f"{prefix}manifest.json", json.dumps({"version": version}))
+    return archive
+
+
+def test_release_versions_accept_consistent_source_and_zip(release_tree):
+    assert (
+        validate_release(
+            release_tree,
+            "v3.5.1rc12",
+            _release_zip(release_tree),
+        )
+        == "3.5.1rc12"
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "custom_components/ttlock_ble/manifest.json",
+        "pyproject.toml",
+        ".release-please-manifest.json",
+        "uv.lock",
+    ],
+)
+def test_release_versions_reject_any_stale_metadata(release_tree, metadata):
+    path = release_tree / metadata
+    path.write_text(path.read_text().replace("3.5.1rc12", "3.5.1rc10"))
+    with pytest.raises(ValueError, match="Release version mismatch"):
+        validate_release(release_tree, "v3.5.1rc12", _release_zip(release_tree))
+
+
+def test_release_versions_reject_stale_zip_manifest(release_tree):
+    with pytest.raises(ValueError, match=r"ZIP manifest=3\.5\.1rc10"):
+        validate_release(
+            release_tree,
+            "v3.5.1rc12",
+            _release_zip(release_tree, "3.5.1rc10"),
+        )
+
+
+def test_release_versions_reject_wrong_tag_and_missing_prefix(release_tree):
+    with pytest.raises(ValueError, match="Release version mismatch"):
+        validate_release(release_tree, "v3.5.1rc11")
+    with pytest.raises(ValueError, match="Release tag must"):
+        validate_release(release_tree, "3.5.1rc12")
+
+
+def test_release_versions_reject_rc11_packaging_defect(release_tree):
+    for path in release_tree.rglob("*"):
+        if path.is_file():
+            path.write_text(path.read_text().replace("3.5.1rc12", "3.5.1rc10"))
+    with pytest.raises(ValueError, match="Release version mismatch"):
+        validate_release(
+            release_tree,
+            "v3.5.1rc11",
+            _release_zip(release_tree, "3.5.1rc10"),
+        )
+
+
+def test_release_versions_reject_nested_install_zip(release_tree):
+    with pytest.raises(ValueError, match="Install ZIP must"):
+        validate_release(
+            release_tree,
+            "v3.5.1rc12",
+            _release_zip(release_tree, prefix="ttlock_ble/"),
+        )
+
+
+def test_release_workflow_checks_versions_before_packaging_and_upload():
+    workflow = (_ROOT / ".github/workflows/publish-hacs-zip.yml").read_text()
+    source_check = workflow.index(
+        'run: python scripts/validate_release.py --tag "$TAG"'
+    )
+    package = workflow.index("git archive --format=zip")
+    zip_check = workflow.index('--tag "$TAG" --archive "$ARCHIVE"')
+    upload = workflow.index('gh release upload "$TAG"')
+    assert source_check < package < zip_check < upload
+
+
+def test_release_validation_cli_fails_before_upload_for_stale_versions(release_tree):
+    result = subprocess.run(  # noqa: S603
+        [
+            str(_ROOT / ".venv/bin/python"),
+            str(_ROOT / "scripts/validate_release.py"),
+            "--root",
+            str(release_tree),
+            "--tag",
+            "v3.5.1rc11",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "Release version mismatch" in result.stderr

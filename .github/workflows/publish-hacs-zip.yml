@@ -26,6 +26,11 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
           persist-credentials: false
 
+      - name: Validate source release versions
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/validate_release.py --tag "$TAG"
+
       - name: Package the tracked integration files
         run: >-
           git archive --format=zip
@@ -34,23 +39,9 @@ jobs:
 
       - name: Validate the install archive
         env:
+          TAG: ${{ github.event.release.tag_name }}
           ARCHIVE: ${{ runner.temp }}/ttlock_ble.zip
-        run: |
-          python - <<'PY'
-          import os
-          from zipfile import ZipFile
-
-          with ZipFile(os.environ["ARCHIVE"]) as archive:
-              files = {name for name in archive.namelist() if not name.endswith("/")}
-
-          if "manifest.json" not in files:
-              raise SystemExit("ttlock_ble.zip has no root manifest.json")
-          if any(
-              name.startswith(("custom_components/", "ttlock_ble/"))
-              for name in files
-          ):
-              raise SystemExit("ttlock_ble.zip contains an unexpected directory prefix")
-          PY
+        run: python scripts/validate_release.py --tag "$TAG" --archive "$ARCHIVE"
 
       - name: Attach the HACS asset
         env:
