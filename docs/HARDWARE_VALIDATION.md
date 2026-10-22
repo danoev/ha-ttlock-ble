@@ -142,3 +142,10 @@ is safer than firing historical unlock automations.
 Stop immediately on an unintended operation, leaked secret, stale-state
 overwrite, duplicate command, historical-event flood, raw BlueZ/private scanner
 path, or requirement to configure the HA adapter globally Active.
+
+## RC14 read-only inventory retest
+
+See [the S31 evidence and next-session checklist](RC14_ACCESS_MANAGEMENT.md#next-safe-hardware-session-and-write-development-order).
+Fingerprint/card counts have already been corroborated on the S31; PIN
+enumeration remains partial. Do not collect raw decrypted frames. RC14 is
+unpublished; use HACS only after separate publication approval.

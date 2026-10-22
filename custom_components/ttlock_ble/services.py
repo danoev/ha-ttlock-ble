@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
@@ -14,14 +15,16 @@ from homeassistant.helpers.device_registry import async_get as async_get_device_
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.util import dt as dt_util
 
-from ttlock_ble import InventoryResult, KeyboardPwdType
+from ttlock_ble import InventoryError, InventoryReason, InventoryResult, KeyboardPwdType
 
+from .access import AccessFailure, AccessInventoryError
 from .const import DOMAIN
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse
+    from homeassistant.util.json import JsonObjectType
 
     from .connection import TtlockBleConnection
     from .data import TtlockBleConfigEntry
@@ -199,15 +202,25 @@ async def _async_set_auto_lock(hass: HomeAssistant, call: ServiceCall) -> None:
     ).async_set_auto_lock_time(cast("int", call.data[ATTR_SECONDS]))
 
 
-def _inventory_response(method: str, result: InventoryResult) -> ServiceResponse:
+def _inventory_response(method: str, result: InventoryResult) -> JsonObjectType:
     """Return only counts and classified validity, never credential material."""
     validity_counts: dict[str, int] = {}
     for item in result.entries:
         validity_counts[item.validity] = validity_counts.get(item.validity, 0) + 1
     return cast(
-        "ServiceResponse",
+        "JsonObjectType",
         {
             "method": method,
+            "reason": result.reason.value
+            if result.reason is not InventoryReason.COMPLETE
+            else (
+                "incomplete_inventory"
+                if method == "keypad_pin"
+                or not result.complete
+                or result.skipped_unknown
+                else "complete"
+            ),
+            "stage": "inventory",
             "read_status": "partial"
             if method == "keypad_pin"
             or not result.complete
@@ -245,17 +258,52 @@ async def _async_get_access_inventory(
                 "method": method,
                 "read_status": "unverified",
                 "reason": "admin_key_required",
+                "stage": "admin",
             },
         )
     try:
         result = await connection.async_get_access_inventory(method)
+    except (InventoryError, AccessInventoryError) as error:
+        response: JsonObjectType = {
+            "method": method,
+            "read_status": "unverified",
+            "reason": error.reason.value,
+            "stage": error.stage,
+        }
+        if isinstance(error, InventoryError) and error.diagnostic is not None:
+            response["response_metadata"] = asdict(error.diagnostic)
+        if error.stage == "queue":
+            return response
+        return _with_connection_diagnostics(response, connection)
     except Exception:  # noqa: BLE001
         # Credential-safe response; asyncio cancellation still propagates.
         return cast(
             "ServiceResponse",
-            {"method": method, "read_status": "unverified", "reason": "read_failed"},
+            {
+                "method": method,
+                "read_status": "unverified",
+                "reason": "read_failed",
+                "stage": "inventory",
+            },
         )
-    return _inventory_response(method, result)
+    response = _inventory_response(method, result)
+    if result.diagnostic is not None:
+        response["response_metadata"] = asdict(result.diagnostic)
+    return _with_connection_diagnostics(response, connection)
+
+
+def _with_connection_diagnostics(
+    response: JsonObjectType, connection: TtlockBleConnection
+) -> JsonObjectType:
+    """Include safe elapsed/cleanup metadata and distinguish scanner from GATT."""
+    metadata = connection.inventory_diagnostics
+    if isinstance(metadata, dict) and metadata:
+        response["connection_diagnostics"] = dict(metadata)
+        if metadata.get("reason") == AccessFailure.CLEANUP.value:
+            response.update(reason=AccessFailure.CLEANUP.value, stage="cleanup")
+            if "count" in response:
+                response["read_status"] = "partial"
+    return response
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:

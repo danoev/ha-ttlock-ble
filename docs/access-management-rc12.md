@@ -6,14 +6,15 @@ This branch adds **on-demand, read-only summaries** of access inventory. Use
 completeness and limitations. It does not expose PINs, card UIDs, fingerprint
 IDs or credential slots, and it creates no credential entities or Recorder
 attributes. Inventory needs the stored administrator password; a key without
-one returns `admin_key_required` before BLE acquisition. The actual front-door
-firmware has not yet been tested against these queries.
+one returns `admin_key_required` before BLE acquisition. S31 read evidence now exists: one PIN remains partial, while two fingerprints
+and two cards were completely enumerated and counts corroborated with the app.
+See [RC14 evidence and management foundations](RC14_ACCESS_MANAGEMENT.md).
 
 | Method | Read | Create | Modify | Delete | Current qualification |
 | --- | --- | --- | --- | --- | --- |
 | Keypad PIN | Partially discoverable | Existing add action | Unsupported | Existing delete/clear actions | The BLE list omits unused batch/offline PINs. A completed cursor does not establish complete access coverage. Existing writes are unchanged. |
-| Fingerprint | Protocol-supported summary; lock unverified | Unsupported | Unsupported | Unsupported | Indexed `0x06/0x06` query returns counts and validity only. Cyclic constraints and identity are not represented. |
-| IC card | Four-byte protocol summary; lock unverified | Unsupported | Unsupported | Unsupported | Indexed `0x05/0x01` is adapted from upstream SDK PR #96's hardware-tested four-byte layout. An eight-byte layout remains unverified and is reported as incomplete. |
+| Fingerprint | S31 count-corroborated read summary | Unsupported | Unsupported | Unsupported | Indexed `0x06/0x06` query returns counts and validity only. Cyclic constraints and identity are not represented. |
+| IC card | S31 count-corroborated four-byte summary | Unsupported | Unsupported | Unsupported | Indexed `0x05/0x01` is adapted from upstream SDK PR #96's hardware-tested four-byte layout. An eight-byte layout remains unverified and is reported as incomplete. |
 | Fob | Unsupported inventory | Unsupported | Unsupported | Unsupported | Some operation records may classify a fob, but there is no verified local inventory/provisioning contract. |
 | Schedules | Partially discoverable | Existing period PIN action | Unsupported | Existing period PIN delete | Period/cyclic validity is a summary, not an authoritative schedule. No schedule editor or cyclic provisioning is implemented. |
 | Passage mode | Unverified | Unsupported | Unsupported | Unsupported | No verified command, state or acknowledgement path. |
@@ -62,10 +63,8 @@ would require a fresh operation event after the armed state began, validated
 method and locally enrolled identity attribution, a bounded event-age window,
 independent door/contact correlation, replay/duplicate suppression and a
 fail-closed response to missing logs or ambiguous BLE control. None of those
-identities are established by the current credential-free inventory. Two
-observed physical unlocks also do not identify whether the MR5U or USB adapter
-handled BLE; scanner/proxy attribution logs are needed before drawing that
-conclusion.
+identities are established by the current credential-free inventory. The S31 now has MR5U advertisement scanner attribution. Actual GATT backend
+attribution remains unverified; scanner selection alone does not prove it.
 
 ## Provenance and validation boundary
 

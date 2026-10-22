@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from bleak.exc import BleakError
-from ttlock_ble import InventoryEntry, TTLockError
+from ttlock_ble import InventoryEntry, InventoryReason, TTLockError
 
 from custom_components.ttlock_ble.connection import TtlockBleConnection
 
@@ -53,6 +53,8 @@ async def test_explicit_control_preempts_inventory_read_after_cleanup(
         with pytest.raises(asyncio.CancelledError):
             await inventory
         assert order == ["cancel_read", "disconnect", "unlock"]
+        assert conn.inventory_diagnostics["reason"] == "inventory_preempted"
+        assert conn.inventory_diagnostics["cleanup_confirmed"] is True
         mock_ttlock_client.unlock.assert_awaited_once()
     finally:
         inventory.cancel()
@@ -68,12 +70,15 @@ async def test_partial_transport_result_does_not_retain_a_healthy_session(
         limitation="inventory read interrupted",
         skipped_unknown=0,
         transport_interrupted=True,
+        reason=InventoryReason.TRANSPORT,
     )
     mock_ttlock_client.get_cards = AsyncMock(return_value=result)
     conn = TtlockBleConnection(hass, sample_virtual_key)
     assert await conn.async_get_access_inventory("ic_card") is result
     mock_ttlock_client.disconnect.assert_awaited_once()
     assert conn._client is None
+    assert conn.inventory_diagnostics["reason"] == "transport_interrupted"
+    assert conn.inventory_diagnostics["cleanup_confirmed"] is True
 
 
 async def test_inventory_is_rejected_while_control_is_in_progress(
@@ -91,7 +96,7 @@ async def test_inventory_is_rejected_while_control_is_in_progress(
     control = asyncio.create_task(conn.async_unlock())
     try:
         await started.wait()
-        with pytest.raises(TTLockError, match="another operation"):
+        with pytest.raises(TTLockError, match="connection_busy"):
             await conn.async_get_access_inventory("ic_card")
     finally:
         release.set()
@@ -109,7 +114,7 @@ async def test_inventory_timeout_closes_session_and_suppresses_raw_error(
             "custom_components.ttlock_ble.connection.INVENTORY_OPERATION_TIMEOUT_SECONDS",
             0.01,
         ),
-        pytest.raises(TTLockError, match="inventory read failed"),
+        pytest.raises(TTLockError, match="read_deadline_exceeded"),
     ):
         await conn.async_get_access_inventory("ic_card")
     mock_ttlock_client.disconnect.assert_awaited_once()
@@ -151,13 +156,17 @@ async def test_repeated_cancellation_keeps_cleanup_owned_before_unlock(
         await inventory
     mock_ttlock_client.disconnect.assert_awaited_once()
     mock_ttlock_client.unlock.assert_awaited_once()
+    assert conn.inventory_diagnostics["reason"] == "inventory_cancelled"
+    assert conn.inventory_diagnostics["cleanup_confirmed"] is True
 
 
 async def test_interrupted_read_retains_failed_cleanup_and_blocks_replacement(
     hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, caplog
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    result = SimpleNamespace(transport_interrupted=True)
+    result = SimpleNamespace(
+        transport_interrupted=True, reason=InventoryReason.TRANSPORT
+    )
     mock_ttlock_client.get_cards = AsyncMock(return_value=result)
     mock_ttlock_client.disconnect.side_effect = BleakError("synthetic-private-cleanup")
     conn = TtlockBleConnection(hass, sample_virtual_key)

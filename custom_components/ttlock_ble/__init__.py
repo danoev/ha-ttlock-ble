@@ -17,6 +17,7 @@ from homeassistant.helpers.device_registry import (
 
 from ttlock_ble import VirtualKey
 
+from .admin_api import async_setup_admin_api
 from .advertisement import TtlockBleAdvertisementTracker
 from .connection import TtlockBleConnection
 from .const import (
@@ -55,6 +56,7 @@ PLATFORMS: list[Platform] = [
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Register integration-wide local management actions."""
     await async_setup_services(hass)
+    async_setup_admin_api(hass)
     return True
 
 

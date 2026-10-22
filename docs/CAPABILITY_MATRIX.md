@@ -1,5 +1,9 @@
 # TTLock local-management capability matrix
 
+Current S31 / RC14 evidence and implementation status are maintained in
+[RC14 access management](RC14_ACCESS_MANAGEMENT.md). The original investigation
+below is historical, not the current hardware support claim.
+
 This matrix records the Phase 0 investigation performed against the modern
 `roquerodrigo` SDK and Home Assistant integration, plus the requested protocol
 references. It describes repository state at the start of the
