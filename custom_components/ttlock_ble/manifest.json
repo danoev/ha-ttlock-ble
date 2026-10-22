@@ -12,7 +12,7 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/danoev/ha-ttlock-ble/issues",
   "requirements": [
-    "ttlock-ble@https://github.com/danoev/ttlock-ble/archive/60604872e004d9dc7fd74aaf3ad260da9143b4c1.tar.gz"
+    "ttlock-ble@https://github.com/danoev/ttlock-ble/archive/5bb8f4fa97f0b53f33b7713b5d1658ee1554fe4c.tar.gz"
   ],
-  "version": "3.5.1rc13"
+  "version": "3.5.1rc14"
 }

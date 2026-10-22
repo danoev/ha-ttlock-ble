@@ -1,6 +1,18 @@
 # Changelog
 
-## 3.5.1rc13 (unpublished access-inventory candidate)
+## 3.5.1rc14 (unpublished development candidate)
+
+- Classify discovery, GATT, admin, parser, transport and cleanup failures without
+  raw frames or credential-bearing exception chains; preserve partial counts.
+- Add safe PIN page/response-shape metadata without guessing S31 termination.
+- Distinguish advertisement scanner from unverified GATT backend attribution.
+- Add administrator-only metadata and dormant private credential-reference
+  groundwork; no new secret submission interface or credential writes.
+- Record S31 hardware-correlated fingerprint/card counts and partial PIN evidence.
+- Preserve inventory preemption, budgets, cleanup ownership and single-send control.
+
+
+## 3.5.1rc13 (published prerelease)
 
 - Add on-demand credential-free PIN, fingerprint and four-byte IC-card summaries.
 - Mark incomplete coverage and transport interruption explicitly.
@@ -25,7 +37,7 @@
 
 This fork-only prerelease series preserves every published tag. **RC1 through
 RC11 remain historical checkpoints; RC12 is the published corrective baseline
-and RC13 is the unpublished inventory candidate.** They remain available solely as
+and RC13 is the published inventory prerelease. RC14 is the unpublished diagnostic candidate.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease
