@@ -18,16 +18,16 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock/unlock, authoritative state queries, passive battery updates, and operation-log reconciliation use BLE without a cloud round-trip on every operation. This fork uses the maintained sibling SDK fork [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble), based on and preserving credit to [`roquerodrigo/ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc15` prepares a narrow PIN pagination correction for an exact
-> upstream-captured terminal marker. S31 fingerprint/card counts are corroborated;
-> S31 PIN completion needs the next controlled read-only test. PIN coverage
-> remains partial even when supported enumeration reaches a validated end. Inventory yields to explicit
-> control and always tears down its session. It preserves RC12's bounded
-> acquisition, single-send control and retained cleanup ownership. Hardware
-> testing must use the actual GitHub prerelease through HACS; do not install
-> a local ZIP or substitute a local SDK. See the
-> [RC15 publication handoff](docs/PRERELEASE_3.5.1RC15.md). New credential writes
-> and automatic Alarmo disarming remain disabled.
+> Version `3.5.1rc16` is an unpublished administrator-access foundation.
+> The local admin-only **TTLock access** panel provides individual private
+> references, user-assigned labels, stale-reference handling and an explicit
+> opt-out for legacy PIN-write services. It accepts no credential secrets and
+> enables no new writes. RC15 S31 PIN cursor completion (1 PIN), fingerprint2
+> and four-byte card2 are now corroborated against the app. Unused offline/batch
+> PIN coverage, schedules, identity, writes and GATT attribution remain limited
+> or unverified. See the [RC16 security and hardware plan](docs/RC16_SECURE_ACCESS.md).
+> Install only a separately approved GitHub prerelease through HACS; never
+> developer files. Automatic Alarmo disarming remains disabled.
 
 ## Features
 
@@ -76,7 +76,7 @@ The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `p
 
 ## Installation
 
-1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled. Published `v3.5.1rc12`, `v3.5.1rc13` and `v3.5.1rc14` remain available; this branch prepares unpublished `v3.5.1rc15`, which requires separate publication approval before HACS testing. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
+1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled. Published `v3.5.1rc12` through `v3.5.1rc15` remain available; this branch prepares unpublished `v3.5.1rc16`, which requires separate publication approval before HACS testing. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
 2. Restart Home Assistant.
 3. Settings → Devices & Services → Add Integration → **TTLock BLE**.
 4. Choose how the keys are obtained:

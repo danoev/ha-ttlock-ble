@@ -1,3 +1,11 @@
+> RC16 update: the administrator supplied successful RC15 S31 PIN completion:
+> one permanent PIN matching the app, exact short-end predicate true at cursor336,
+> no transport interruption, cleanup confirmed, 4,340ms. Fingerprint2 and card2
+> match the app. See [RC16](RC16_SECURE_ACCESS.md) for the current capability matrix
+> and separately controlled disposable-credential test plan. Earlier notes below
+> are historical. PIN batch/offline coverage, schedules, writes, identity and GATT
+> backend attribution are not established by these reads.
+
 # TTLock BLE 3.5.1rc10 hardware validation
 
 RC10 is a hardware-validation prerelease, not a stable release. RC9 remains the

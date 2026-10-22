@@ -1,6 +1,6 @@
 [project]
 name = "ha-ttlock-ble"
-version = "3.5.1rc15"
+version = "3.5.1rc16"
 description = "Home Assistant integration for DLock-XP / TTLock smart locks (BLE)"
 requires-python = ">=3.14.2"
 
@@ -23,7 +23,7 @@ dev = [
     "pytest-cov==7.1.0",
     "pytest-homeassistant-custom-component==0.13.354",
     "serialx==1.8.2",
-    "ttlock-ble @ https://github.com/danoev/ttlock-ble/archive/fda4233d3fb15ed256f5aa66ebd0f971587e4e9e.tar.gz",
+    "ttlock-ble @ https://github.com/danoev/ttlock-ble/archive/81c687f76a498cd97ed6287199bedb57f9d9b2fc.tar.gz",
 ]
 lint = [
     "ruff==0.16.1",

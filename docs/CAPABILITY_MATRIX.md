@@ -1,6 +1,8 @@
 # TTLock local-management capability matrix
 
-Current S31 PIN pagination evidence is maintained in
+Current RC16 capabilities, supplied successful S31 PIN/fingerprint/card evidence
+and private administration are documented in [RC16 secure access](RC16_SECURE_ACCESS.md).
+Historical S31 PIN pagination evidence is maintained in
 [RC15 PIN pagination](RC15_PIN_PAGINATION.md); broader capabilities remain in
 [RC14 access management](RC14_ACCESS_MANAGEMENT.md). The original investigation
 below is historical, not the current hardware support claim.

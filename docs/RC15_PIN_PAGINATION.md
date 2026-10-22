@@ -1,3 +1,9 @@
+> Subsequent RC15 hardware result: the S31 now confirms one permanent PIN,
+> cursor completion, the exact short-end-marker predicate, no interruption and
+> confirmed cleanup in4,340ms. Fingerprint2/card2 also match the app. See the
+> [RC16 current matrix](RC16_SECURE_ACCESS.md). The investigation below records
+> the evidence available before that controlled test, not a current failure.
+
 # RC15: exact PIN-list termination, with S31 confirmation pending
 
 RC15 starts at published RC14 integration
