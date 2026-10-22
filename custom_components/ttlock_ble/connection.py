@@ -80,6 +80,10 @@ EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS = 60.0
 MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS = 60.0
 INVENTORY_ACQUISITION_TIMEOUT_SECONDS = 16.0
 INVENTORY_OPERATION_TIMEOUT_SECONDS = 30.0
+OPTIONAL_STATE_TIMEOUT_SECONDS = 3.0
+ACTIVITY_STATE_TIMEOUT_SECONDS = 20.0
+AUTO_LOCK_CACHE_SECONDS = 3600.0
+MAX_AUTO_LOCK_DELAY_SECONDS = 0xFFFF
 ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS = 16.0
 UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS = 48.0
 AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS = 48.0
@@ -198,6 +202,11 @@ class TtlockBleConnection:
             asyncio.Task[InventoryResult | AdministrativeInventory] | None
         ) = None
         self._control_requests = 0
+        self._activity_state_task: asyncio.Task[object] | None = None
+        self._state_listener: (
+            Callable[[LockState | None, int | None, str], None] | None
+        ) = None
+        self._auto_lock_delay: tuple[int, float] | None = None
         self._inventory_diagnostics: dict[str, str | int | bool | None] = {}
         self._acquisition_failure = AccessFailure.NO_CANDIDATE
         self._advertisement_source: str | None = None
@@ -248,6 +257,8 @@ class TtlockBleConnection:
         self._disconnected.set()
         if self._inventory_task is not None:
             self._inventory_task.cancel()
+        if self._activity_state_task is not None:
+            self._activity_state_task.cancel()
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -323,11 +334,16 @@ class TtlockBleConnection:
 
     async def async_get_auto_lock_time(self) -> int:
         """Read the native auto-lock delay from the lock."""
-        return await self._async_run_management_command(
+        seconds = await self._async_run_management_command(
             "read auto-lock delay",
             lambda client: client.get_auto_lock_time(),
             active_scan=True,
         )
+        if 0 <= seconds <= MAX_AUTO_LOCK_DELAY_SECONDS:
+            self._auto_lock_delay = (seconds, monotonic())
+        else:
+            self._auto_lock_delay = None
+        return seconds
 
     async def async_set_auto_lock_time(self, seconds: int) -> None:
         """Set the native auto-lock delay; zero disables it."""
@@ -336,6 +352,60 @@ class TtlockBleConnection:
             lambda client: client.set_auto_lock_time(seconds),
             active_scan=True,
         )
+        # A MODIFY acknowledgement need not include a readback of the setting.
+        self._auto_lock_delay = None
+
+    @property
+    def auto_lock_delay(self) -> int | None:
+        """Use only a recent successful read, never an assumed configuration."""
+        if self._auto_lock_delay is None:
+            return None
+        seconds, observed = self._auto_lock_delay
+        return seconds if monotonic() - observed <= AUTO_LOCK_CACHE_SECONDS else None
+
+    def set_state_listener(
+        self, listener: Callable[[LockState | None, int | None, str], None] | None
+    ) -> None:
+        """Publish opportunistic queries synchronously before releasing ownership."""
+        self._state_listener = listener
+
+    def _publish_state_read(
+        self, result: tuple[LockState | None, int | None], source: str
+    ) -> None:
+        state, battery = result
+        if self._state_listener is not None:
+            self._state_listener(state, battery, source)
+
+    async def async_reconcile_state(self) -> bool:
+        """One bounded, preemptible query; never wait behind another operation."""
+        if self._control_requests or self._lock.locked() or self._closing:
+            return False
+        self._activity_state_task = asyncio.current_task()
+        async with self._lock:
+            try:
+                async with asyncio.timeout(ACTIVITY_STATE_TIMEOUT_SECONDS):
+                    client = await self._async_ensure_connected_locked(
+                        active_scan=True,
+                        intent=_AcquisitionIntent.ROUTINE_QUERY,
+                        reason="external activity state verification",
+                    )
+                    if client is None:
+                        return False
+                    result = await client.query_state()
+                    self._publish_state_read(result, "query_after_activity")
+                    return result[0] in (LockState.LOCKED, LockState.UNLOCKED)
+            except Exception:  # noqa: BLE001 -- no raw transport diagnostics
+                LOGGER.debug(
+                    "Activity state verification failed for %s", self._key.lockMac
+                )
+                return False
+            finally:
+                try:
+                    await self._async_disconnect_locked(
+                        reason="activity verification complete"
+                    )
+                finally:
+                    self._activity_state_task = None
 
     async def async_add_passcode(
         self,
@@ -462,7 +532,25 @@ class TtlockBleConnection:
                     self._inventory_diagnostics.update(
                         reason=summary.reason.value, stage="inventory"
                     )
-                    return result
+                # Leave the inventory deadline before this optional read: a state
+                # timeout must not turn a completed credential read into a failure.
+                remaining = INVENTORY_OPERATION_TIMEOUT_SECONDS - (
+                    monotonic() - started
+                )
+                if not summary.transport_interrupted and remaining > 0:
+                    try:
+                        async with asyncio.timeout(
+                            min(OPTIONAL_STATE_TIMEOUT_SECONDS, remaining)
+                        ):
+                            state = await client.query_state()
+                            self._publish_state_read(state, "query_after_inventory")
+                    except Exception:  # noqa: BLE001 -- inventory remains successful
+                        self._publish_state_read((None, None), "query_after_inventory")
+                        LOGGER.debug(
+                            "Optional inventory state query failed for %s",
+                            self._key.lockMac,
+                        )
+                return result  # noqa: TRY300 -- optional read shares owned cleanup
             except (AccessInventoryError, InventoryError) as error:
                 self._inventory_diagnostics.update(
                     reason=error.reason.value, stage=error.stage
@@ -584,6 +672,8 @@ class TtlockBleConnection:
         try:
             if self._inventory_task is not None:
                 self._inventory_task.cancel()
+            if self._activity_state_task is not None:
+                self._activity_state_task.cancel()
             await self._async_run_control_command(action)
         finally:
             self._control_requests -= 1

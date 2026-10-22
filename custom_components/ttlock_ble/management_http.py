@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .data import TtlockBleConfigEntry
 
 URL = "/api/ttlock_ble/administration"
-STATIC_URL = "/ttlock-ble-admin/3.5.1.js"
+STATIC_URL = "/ttlock-ble-admin/3.5.2.js"
 _BODY_LIMIT = 4096
 _ID = vol.All(str, vol.Length(min=1, max=128))
 _BASE = {

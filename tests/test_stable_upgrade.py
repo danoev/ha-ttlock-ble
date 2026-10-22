@@ -43,7 +43,7 @@ async def test_reload_preserves_entry_entities_labels_and_legacy_optout(
     assert state["records"][0]["name"] == "Existing label"
     assert not state["fresh"]
     assert state["legacy_pin_writes_disabled"]
-    assert STATIC_URL == "/ttlock-ble-admin/3.5.1.js"
+    assert STATIC_URL == "/ttlock-ble-admin/3.5.2.js"
 
 
 async def test_missing_newer_bluetooth_diagnostics_cannot_break_setup(

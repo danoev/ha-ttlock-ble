@@ -192,6 +192,7 @@ async def async_setup_entry(
     # BLE slots, and each retry stacks another set on top. Callbacks run
     # last-registered-first, so tracking stops before the connections do.
     entry.async_on_unload(_stop_connections)
+    entry.async_on_unload(coordinator.async_shutdown)
     entry.async_on_unload(_stop_advertisement_tracking)
     entry.async_on_unload(log_history.async_save)
 
