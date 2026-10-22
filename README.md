@@ -1,9 +1,14 @@
-# Home Assistant TTLock BLE
+# TTLock BLE (danoev)
 
 > [!IMPORTANT]
-> This is a maintained development fork of
-> [`roquerodrigo/ha-ttlock-ble`](https://github.com/roquerodrigo/ha-ttlock-ble),
-> whose upstream work remains credited and preserved. Report problems specific
+> TTLock BLE (danoev) is an independently maintained fork of the original
+> TTLock BLE Home Assistant integration by **Rodrigo Roque**
+> ([original integration](https://github.com/roquerodrigo/ha-ttlock-ble),
+> [original SDK](https://github.com/roquerodrigo/ttlock-ble)). It builds on his
+> original MIT-licensed work, adds independently tested functionality and aims
+> to contribute generally useful improvements upstream. Rodrigo does not
+> maintain, endorse or provide support for this fork. Original copyright,
+> authorship and [MIT licence](LICENSE) are preserved. Report problems specific
 > to this fork to the
 > [`danoev/ha-ttlock-ble` issue tracker](https://github.com/danoev/ha-ttlock-ble/issues),
 > not to the upstream project.
@@ -18,16 +23,18 @@
 Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https://www.home-assistant.io/). Lock/unlock, authoritative state queries, passive battery updates, and operation-log reconciliation use BLE without a cloud round-trip on every operation. This fork uses the maintained sibling SDK fork [`danoev/ttlock-ble`](https://github.com/danoev/ttlock-ble), based on and preserving credit to [`roquerodrigo/ttlock-ble`](https://github.com/roquerodrigo/ttlock-ble).
 
 > [!CAUTION]
-> Version `3.5.1rc16` is an unpublished administrator-access foundation.
+> Version `3.5.1` is the first stable danoev distribution.
 > The local admin-only **TTLock access** panel provides individual private
-> references, user-assigned labels, stale-reference handling and an explicit
+> references, user-assigned labels, explicit uncertainty handling and an explicit
 > opt-out for legacy PIN-write services. It accepts no credential secrets and
 > enables no new writes. RC15 S31 PIN cursor completion (1 PIN), fingerprint2
-> and four-byte card2 are now corroborated against the app. Unused offline/batch
+> and four-byte card2 are corroborated against the app. Failed reads retain
+> last-known labels and records as unverified. Limited PIN-list omissions never
+> establish revocation or automatically retire a PIN reference. Unused offline/batch
 > PIN coverage, schedules, identity, writes and GATT attribution remain limited
-> or unverified. See the [RC16 security and hardware plan](docs/RC16_SECURE_ACCESS.md).
-> Install only a separately approved GitHub prerelease through HACS; never
-> developer files. Automatic Alarmo disarming remains disabled.
+> or unverified. See the [stable capabilities and security limits](docs/STABLE_3.5.1.md).
+> Install released assets through HACS; never developer files. Automatic Alarmo
+> disarming remains disabled. This stable designation does not enable new writes.
 
 ## Features
 
@@ -76,13 +83,28 @@ The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `p
 
 ## Installation
 
-1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled. Published `v3.5.1rc12` through `v3.5.1rc15` remain available; this branch prepares unpublished `v3.5.1rc16`, which requires separate publication approval before HACS testing. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
+1. Install via HACS using the button above, or add `https://github.com/danoev/ha-ttlock-ble` as a custom repository (category: Integration). Its HACS display name is **TTLock BLE (danoev)**; select stable **v3.5.1**. Existing danoev installations receive the update from the same repository. RC12–RC16 remain available as historical prereleases. If HACS tracks the original Rodrigo repository, choose explicitly which distribution to use; do not install both side by side under the same domain.
 2. Restart Home Assistant.
-3. Settings → Devices & Services → Add Integration → **TTLock BLE**.
+3. Existing installations: keep the existing config entry and entities, and refresh the browser after restarting. New installations: Settings → Devices & Services → Add Integration → **TTLock BLE**. The internal integration name and domain remain unchanged.
 4. Choose how the keys are obtained:
    - **Sign in to a TTLock account** — enter the email + password you use in the official app. If TTLock has never seen this Home Assistant before it emails a verification code; paste it into the next step. Every lock on the account is synced at once.
    - **Enter a lock key manually** — for a lock initialised outside the cloud. See below.
 5. From this point on, all lock / unlock / state operations stay on Bluetooth.
+
+Home Assistant **2026.5.1** and HACS **2.0.5** remain the compatibility floor.
+Keep HA updated with its security releases; a minimum version is not a security
+recommendation. Stable development validation targets current HA 2026.10.2;
+the older floor also has separate synthetic setup/entity/admin compatibility
+tests. Newer HA reachability diagnostics are optional on older HA.
+
+An administrator using a normal HA browser session can open **TTLock access**.
+Read-only inventories and local labels do not prove a person's identity. Failed
+reads preserve last-known names, disable stale naming and do not delete physical
+credentials. Legacy PIN services remain enabled by default and non-confidential;
+the panel's persistent per-lock opt-out blocks future BLE writes but cannot erase
+service-event or automation-trace data already submitted.
+
+[Maintenance and upstream contribution process](docs/MAINTENANCE.md)
 
 ### Adding a lock without a TTLock account
 
@@ -215,11 +237,9 @@ uv run mypy custom_components/ttlock_ble
 uv run pytest
 ```
 
-HA runs with config in `config/` and `PYTHONPATH` pointing at the repo root. To reset entity/device IDs during development:
-
-```bash
-rm config/.storage/core.entity_registry config/.storage/core.device_registry
-```
+Development uses a disposable HA configuration in `config/` with `PYTHONPATH`
+pointing at the repository. Upgrade tests preserve the existing config entry,
+entity IDs and registries; never reset an installed household configuration.
 
 ## Layout
 

@@ -1,6 +1,36 @@
 # Changelog
 
-## 3.5.1rc16 (unpublished administration candidate)
+## 3.5.1 (2026-10-22)
+
+First stable independently maintained **TTLock BLE (danoev)** distribution,
+derived from Rodrigo Roque's original MIT-licensed integration and SDK; original
+copyright and authorship remain preserved. Rodrigo does not support this fork.
+
+- Retain the RC16 local BLE control, priority/bounds, authoritative state,
+  read-only inventories, private administrator panel and persistent labels.
+- Preserve scoped last-known records/names after failed HTTP/Bluetooth reads;
+  show unverified evidence and disable stale naming without implying deletion.
+- Keep limited PIN references/labels across empty or omitted records and restart;
+  completed cursor traversal is not exhaustive PIN coverage or revocation proof.
+- Distinguish fresh observation, unverified history and non-observation. No new
+  credential create/modify/delete workflow or verified person identity is enabled.
+- Keep legacy PIN services compatible by default, with explicit non-confidential
+  event/trace warnings and a persistent administrator per-lock opt-out.
+- Name the HACS repository TTLock BLE (danoev); preserve the repository, domain,
+  config entries, unique/entity IDs and version-1 private metadata schema.
+- Load the panel from a stable-specific module URL and make optional newer HA
+  Bluetooth diagnostics non-blocking on the declared minimum HA release.
+- Validate the current HA development baseline, browser failures, API/persistence
+  recovery and upgrade identity. Existing released tags/assets are unchanged.
+- Submit focused PIN-safe diagnostics upstream as
+  [SDK PR #101](https://github.com/roquerodrigo/ttlock-ble/pull/101), based directly
+  on original SDK main; do not migrate the preserved fork SDK transport lineage.
+
+PIN offline/batch coverage, full schedules, household identity, new physical
+credential management and actual GATT-backend attribution remain unverified.
+Automatic Alarmo disarming remains disabled. See [stable limits](docs/STABLE_3.5.1.md).
+
+## 3.5.1rc16 (published prerelease)
 
 - Add a local admin-only HTTP/sidebar panel for private individual references,
   explicit labels, freshness/presence lifecycle and local reset; no secret entry.
