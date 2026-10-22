@@ -209,6 +209,7 @@ def mock_ttlock_connection() -> Generator[MagicMock]:
     instance.async_clear_passcodes = AsyncMock(return_value=None)
     instance.async_get_access_inventory = AsyncMock(return_value=None)
     instance.inventory_admin_available = True
+    instance.inventory_diagnostics = {}
     instance.is_connected = True
     instance.last_connection_rssi = -70
     with patch("custom_components.ttlock_ble.TtlockBleConnection") as cls:

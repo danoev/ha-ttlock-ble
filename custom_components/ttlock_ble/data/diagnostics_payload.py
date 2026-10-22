@@ -20,3 +20,4 @@ class TtlockBleDiagnosticsPayload(TypedDict):
     locks: list[TtlockBleDiagnosticsLockSummary]
     coordinator_state: Mapping[str, TtlockBleLockState]
     advertisements: Mapping[str, TtlockBleDiagnosticsAdvertisement | None]
+    inventory_attempts: Mapping[str, dict[str, str | int | bool | None]]

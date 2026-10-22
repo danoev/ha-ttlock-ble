@@ -38,6 +38,7 @@ from homeassistant.components.bluetooth import (
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from ttlock_ble import (
+    InventoryError,
     InventoryResult,
     KeyboardPwdType,
     LockState,
@@ -45,6 +46,7 @@ from ttlock_ble import (
     TTLockError,
 )
 
+from .access import AccessFailure, AccessInventoryError
 from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
 from .log_history import TtlockBleLogHistory
@@ -187,6 +189,9 @@ class TtlockBleConnection:
         self._lock = asyncio.Lock()
         self._inventory_task: asyncio.Task[InventoryResult] | None = None
         self._control_requests = 0
+        self._inventory_diagnostics: dict[str, str | int | bool | None] = {}
+        self._acquisition_failure = AccessFailure.NO_CANDIDATE
+        self._advertisement_source: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._closing = False
         self._closing_event = asyncio.Event()
@@ -365,6 +370,11 @@ class TtlockBleConnection:
         )
 
     @property
+    def inventory_diagnostics(self) -> dict[str, str | int | bool | None]:
+        """Return a copy of safe last-attempt metadata, including cancellations."""
+        return dict(self._inventory_diagnostics)
+
+    @property
     def inventory_admin_available(self) -> bool:
         """Do not open a BLE session when this key lacks an admin password."""
         return bool(self._key.adminPs) and self._key.adminPs.isdecimal()
@@ -378,8 +388,7 @@ class TtlockBleConnection:
             msg = "Unknown inventory method"
             raise ValueError(msg)
         if self._inventory_task is not None and not self._inventory_task.done():
-            msg = "An inventory read is already active"
-            raise TTLockError(msg)
+            raise AccessInventoryError(AccessFailure.BUSY, "queue")
         task = self._hass.async_create_task(
             self._async_read_access_inventory(method),
             name=f"{DOMAIN}.inventory.{self._key.lockMac}",
@@ -394,8 +403,10 @@ class TtlockBleConnection:
     async def _async_read_access_inventory(self, method: str) -> InventoryResult:
         """Never queue behind control, and close even a partially successful read."""
         if self._control_requests or self._lock.locked() or self._closing:
-            msg = "Inventory unavailable while another operation is active"
-            raise TTLockError(msg)
+            raise AccessInventoryError(AccessFailure.BUSY, "queue")
+        started = monotonic()
+        self._inventory_diagnostics = {"reason": "in_progress", "stage": "acquisition"}
+        self._advertisement_source = None
         async with self._lock:
             try:
                 # Acquisition and all pages share one deadline, excluding mandatory
@@ -407,21 +418,69 @@ class TtlockBleConnection:
                         reason="read-only access inventory",
                     )
                     if client is None:
-                        msg = "Inventory could not acquire a Bluetooth connection"
-                        raise TTLockError(msg)  # noqa: TRY301
+                        stage = {
+                            AccessFailure.GATT: "gatt",
+                            AccessFailure.CLEANUP: "cleanup",
+                        }.get(self._acquisition_failure, "discovery")
+                        raise AccessInventoryError(self._acquisition_failure, stage)  # noqa: TRY301
+                    self._inventory_diagnostics["stage"] = "inventory"
                     if method == "keypad_pin":
-                        return await client.get_passcodes()
-                    if method == "fingerprint":
-                        return await client.get_fingerprints()
-                    return await client.get_cards()
+                        result = await client.get_passcodes()
+                    elif method == "fingerprint":
+                        result = await client.get_fingerprints()
+                    else:
+                        result = await client.get_cards()
+                    self._inventory_diagnostics.update(
+                        reason=result.reason.value, stage="inventory"
+                    )
+                    return result
+            except (AccessInventoryError, InventoryError) as error:
+                self._inventory_diagnostics.update(
+                    reason=error.reason.value, stage=error.stage
+                )
+                raise
+            except TimeoutError:
+                self._inventory_diagnostics.update(
+                    reason=AccessFailure.DEADLINE.value, stage="inventory"
+                )
+                raise AccessInventoryError(
+                    AccessFailure.DEADLINE, "inventory"
+                ) from None
+            except asyncio.CancelledError:
+                self._inventory_diagnostics.update(
+                    reason=(
+                        AccessFailure.PREEMPTED
+                        if self._control_requests
+                        else AccessFailure.CANCELLED
+                    ).value,
+                    stage=str(self._inventory_diagnostics["stage"]),
+                )
+                raise
             except Exception:  # noqa: BLE001
                 # Never render transport exceptions or credential-bearing causes.
-                msg = "Access inventory read failed"
-                raise TTLockError(msg) from None
+                self._inventory_diagnostics.update(
+                    reason=AccessFailure.UNKNOWN.value, stage="inventory"
+                )
+                raise AccessInventoryError(AccessFailure.UNKNOWN, "inventory") from None
             finally:
                 # Cancellation also reaches this path. RC12 retains uncertain
                 # backend ownership and blocks replacement until cleanup is proven.
-                await self._async_disconnect_locked(reason="access inventory complete")
+                try:
+                    await self._async_disconnect_locked(
+                        reason="access inventory complete"
+                    )
+                finally:
+                    cleaned = self._client is None and self._pending_client is None
+                    self._inventory_diagnostics.update(
+                        cleanup_confirmed=cleaned,
+                        elapsed_ms=round((monotonic() - started) * 1000),
+                        advertisement_source=self._advertisement_source,
+                        gatt_backend_source="unverified",
+                    )
+                    if not cleaned:
+                        self._inventory_diagnostics.update(
+                            reason=AccessFailure.CLEANUP.value, stage="cleanup"
+                        )
 
     async def async_get_operation_log(self) -> list[LogEntry]:
         """
@@ -787,6 +846,7 @@ class TtlockBleConnection:
         budget = _acquisition_budget(intent)
         deadline = started + budget
         self._reachability_diagnostic = None
+        self._acquisition_failure = AccessFailure.NO_CANDIDATE
         LOGGER.debug(
             "Connection acquisition started for %s "
             "(reason=%s, intent=%s, total_budget=%.1fs, "
@@ -808,6 +868,7 @@ class TtlockBleConnection:
         if not await self._async_retry_pending_cleanup_locked(
             reason=f"retry retained client before {reason}"
         ):
+            self._acquisition_failure = AccessFailure.CLEANUP
             LOGGER.debug(
                 "Connection acquisition blocked for %s "
                 "(reason=%s, failure=uncertain_prior_teardown)",
@@ -826,6 +887,7 @@ class TtlockBleConnection:
         if not await self._async_disconnect_locked(
             reason=f"replace disconnected client before {reason}"
         ):
+            self._acquisition_failure = AccessFailure.CLEANUP
             LOGGER.debug(
                 "Connection acquisition blocked for %s "
                 "(reason=%s, failure=installed_client_teardown_uncertain)",
@@ -886,6 +948,8 @@ class TtlockBleConnection:
             self._owned_client_generation = generation
             client.set_control_allowed(self._control_is_allowed)
             connect_started = monotonic()
+            self._acquisition_failure = AccessFailure.GATT
+            self._advertisement_source = candidate.source
             age = (
                 max(0.0, MONOTONIC_TIME() - candidate.advertisement_time)
                 if candidate.advertisement_time is not None
@@ -928,7 +992,7 @@ class TtlockBleConnection:
                     "BLE connect failed for %s "
                     "(reason=%s, resolution=%s, source=%s, age=%s, "
                     "connect_elapsed=%.1fs, cleanup_elapsed=%.1fs, "
-                    "total_elapsed=%.1fs): %s",
+                    "total_elapsed=%.1fs, error_type=%s)",
                     self._key.lockMac,
                     reason,
                     candidate.resolution,
@@ -937,7 +1001,7 @@ class TtlockBleConnection:
                     monotonic() - connect_started,
                     cleanup.elapsed,
                     monotonic() - started,
-                    exc,
+                    type(exc).__name__,
                 )
                 if not cleanup.succeeded:
                     break
@@ -1214,10 +1278,10 @@ class TtlockBleConnection:
         """Clean up an unwrapped SDK setup failure without changing retries."""
         await self._async_cleanup_candidate(client, reason=reason)
         LOGGER.warning(
-            "BLE setup failed for %s (reason=%s): %s",
+            "BLE setup failed for %s (reason=%s, error_type=%s)",
             self._key.lockMac,
             reason,
-            exc,
+            type(exc).__name__,
         )
 
     async def _async_resolve_initial_candidate_locked(
@@ -1303,11 +1367,12 @@ class TtlockBleConnection:
                 self._key.lockMac,
                 BluetoothReachabilityIntent.CONNECTION,
             )
-        except Exception:  # noqa: BLE001 -- diagnostics must not mask failure
+        except Exception as exc:  # noqa: BLE001 -- diagnostics must not mask failure
             LOGGER.debug(
-                "Could not build Bluetooth reachability diagnostics for %s",
+                "Could not build Bluetooth reachability diagnostics for %s "
+                "(error_type=%s)",
                 self._key.lockMac,
-                exc_info=True,
+                type(exc).__name__,
             )
             return
         self._reachability_diagnostic = diagnostic
@@ -1506,17 +1571,19 @@ class TtlockBleConnection:
             try:
                 await advertisement_task
             except TimeoutError:
+                self._acquisition_failure = AccessFailure.DISCOVERY_TIMEOUT
                 LOGGER.debug(
                     "Address-scoped active acquisition timed out after %.1fs for %s",
                     scan_timeout_seconds,
                     address,
                 )
                 return None
-            except Exception:  # noqa: BLE001 -- retain diagnostic fallback
+            except Exception as exc:  # noqa: BLE001 -- retain diagnostic fallback
                 LOGGER.debug(
-                    "Address-scoped active Bluetooth acquisition failed for %s",
+                    "Address-scoped active Bluetooth acquisition failed for %s "
+                    "(error_type=%s)",
                     address,
-                    exc_info=True,
+                    type(exc).__name__,
                 )
                 return None
             if not resolved:

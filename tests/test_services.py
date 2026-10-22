@@ -251,6 +251,8 @@ async def test_access_inventory_pin_response_is_credential_free(
     )
     assert response == {
         "method": "keypad_pin",
+        "reason": "incomplete_inventory",
+        "stage": "inventory",
         "read_status": "partial",
         "count": 2,
         "validity_counts": {"permanent": 1, "time_window": 1},
@@ -283,6 +285,7 @@ async def test_access_inventory_unverified_admin_skips_ble(
         "method": "fingerprint",
         "read_status": "unverified",
         "reason": "admin_key_required",
+        "stage": "admin",
     }
     mock_ttlock_connection.async_get_access_inventory.assert_not_awaited()
 
@@ -304,6 +307,7 @@ async def test_access_inventory_failure_is_unverified_without_sensitive_error(
         "method": "ic_card",
         "read_status": "unverified",
         "reason": "read_failed",
+        "stage": "inventory",
     }
 
 

@@ -65,6 +65,10 @@ async def async_get_config_entry_diagnostics(
         "entry": diag_entry,
         "locks": locks,
         "coordinator_state": dict(coordinator_state),
+        "inventory_attempts": {
+            mac: connection.inventory_diagnostics
+            for mac, connection in entry.runtime_data.connections.items()
+        },
         "advertisements": {
             key["lockMac"]: _summarize_advertisement(hass, key["lockMac"])
             for key in entry.runtime_data.keys
