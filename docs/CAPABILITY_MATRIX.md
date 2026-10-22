@@ -1,6 +1,7 @@
 # TTLock local-management capability matrix
 
-Current S31 / RC14 evidence and implementation status are maintained in
+Current S31 PIN pagination evidence is maintained in
+[RC15 PIN pagination](RC15_PIN_PAGINATION.md); broader capabilities remain in
 [RC14 access management](RC14_ACCESS_MANAGEMENT.md). The original investigation
 below is historical, not the current hardware support claim.
 
