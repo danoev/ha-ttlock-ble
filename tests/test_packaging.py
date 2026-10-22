@@ -159,6 +159,7 @@ def test_hacs_install_zip_contains_only_integration_files_at_root() -> None:
         archived_files = {
             name for name in install_zip.namelist() if not name.endswith("/")
         }
+        assert install_zip.read("LICENSE") == (_ROOT / "LICENSE").read_bytes()
 
     assert "manifest.json" in archived_files
     assert archived_files == set(tracked)
