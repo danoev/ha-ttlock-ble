@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from homeassistant.const import CONF_SCAN_INTERVAL, Platform
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import (
     async_entries_for_config_entry,
     format_mac,
@@ -17,6 +18,7 @@ from homeassistant.helpers.device_registry import (
 
 from ttlock_ble import VirtualKey
 
+from .access_records import AccessRecordStore
 from .admin_api import async_setup_admin_api
 from .advertisement import TtlockBleAdvertisementTracker
 from .connection import TtlockBleConnection
@@ -32,6 +34,7 @@ from .const import (
 from .coordinator import TtlockBleDataUpdateCoordinator
 from .data import TtlockBleData
 from .log_history import TtlockBleLogHistory
+from .management_http import async_setup_management
 from .services import async_setup_services
 
 if TYPE_CHECKING:
@@ -57,6 +60,7 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Register integration-wide local management actions."""
     await async_setup_services(hass)
     async_setup_admin_api(hass)
+    await async_setup_management(hass)
     return True
 
 
@@ -116,6 +120,18 @@ async def async_setup_entry(
     _async_prune_stale_devices(hass, entry, config)
     stored_keys: list[TtlockBleStoredKey] = list(config["keys"])
     virtual_keys = [VirtualKey.from_dict(dict(k)) for k in stored_keys]
+    access_store = AccessRecordStore(hass, entry.entry_id)
+    access_records: AccessRecordStore | None
+    try:
+        await access_store.async_load()
+    except ValueError, HomeAssistantError, OSError:
+        LOGGER.error(
+            "Private access metadata unavailable; "
+            "administration and legacy PIN writes blocked"
+        )
+        access_records = None
+    else:
+        access_records = access_store
     log_history = TtlockBleLogHistory(hass, entry.entry_id)
     await log_history.async_load()
 
@@ -196,6 +212,7 @@ async def async_setup_entry(
         coordinator=coordinator,
         bluetooth_unsubs=bluetooth_unsubs,
         first_refresh=first_refresh,
+        access_records=access_records,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -225,3 +242,8 @@ async def async_reload_entry(
 ) -> None:
     """Reload config entry."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: TtlockBleConfigEntry) -> None:
+    """Forget private labels on config-entry deletion, without BLE I/O."""
+    await AccessRecordStore(hass, entry.entry_id).async_remove()

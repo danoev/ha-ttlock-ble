@@ -39,7 +39,7 @@ def access_capabilities() -> dict[str, dict[str, str]]:
             if method == "keypad_pin"
             else "implemented",
             "device_support": "requires_read_confirmation",
-            "s31_read_evidence": "partial"
+            "s31_read_evidence": "cursor_completion_corroborated"
             if method == "keypad_pin"
             else "count_corroborated",
             "identity": "unverified",

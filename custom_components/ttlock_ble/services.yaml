@@ -1,6 +1,6 @@
 add_passcode:
   name: Add passcode
-  description: Add a keypad passcode directly to a lock over Bluetooth.
+  description: "Legacy PIN write. Not confidential: HA service events, Recorder and automation traces may retain the code before the handler. Disable in the TTLock access admin panel if unused."
   fields:
     device_id:
       name: Device
@@ -11,7 +11,7 @@ add_passcode:
           integration: ttlock_ble
     code:
       name: Passcode
-      description: A 4-9 digit keypad passcode. The value is not retained by the integration.
+      description: "A 4-9 digit passcode. HA may retain this service input in events and traces; the password selector does not prevent recording."
       required: true
       selector:
         text:
@@ -37,7 +37,7 @@ add_passcode:
 
 delete_passcode:
   name: Delete passcode
-  description: Delete one keypad passcode directly from a lock over Bluetooth.
+  description: "Legacy PIN write. HA may retain the submitted code in service events, Recorder and traces. Not a confidential management interface."
   fields:
     device_id:
       name: Device
@@ -62,7 +62,7 @@ delete_passcode:
 
 clear_passcodes:
   name: Clear passcodes
-  description: Permanently remove every keypad passcode stored by the lock.
+  description: "Legacy destructive PIN write: removes all stored keypad passcodes. Can be explicitly disabled per lock in TTLock access."
   fields:
     device_id:
       name: Device

@@ -146,6 +146,24 @@ def _connection_for_device(hass: HomeAssistant, device_id: str) -> TtlockBleConn
     raise _validation_error(ERROR_DEVICE_NOT_LOADED)
 
 
+async def _legacy_connection(
+    hass: HomeAssistant, device_id: str
+) -> TtlockBleConnection:
+    """Compatibility only: handler cannot retract service-event/trace exposure."""
+    connection = _connection_for_device(hass, device_id)
+    for raw in hass.config_entries.async_entries(DOMAIN):
+        if raw.state is ConfigEntryState.LOADED:
+            entry = cast("TtlockBleConfigEntry", raw)
+            for mac, candidate in entry.runtime_data.connections.items():
+                if candidate is connection:
+                    records = entry.runtime_data.access_records
+                    if records is None or records.legacy_disabled(mac):
+                        msg = "Legacy PIN writes disabled by administrator"
+                        raise ServiceValidationError(msg)
+                    return connection
+    return connection
+
+
 async def _async_add_passcode(hass: HomeAssistant, call: ServiceCall) -> None:
     code = cast("str", call.data[ATTR_CODE])
     _validate_code(code)
@@ -155,10 +173,8 @@ async def _async_add_passcode(hass: HomeAssistant, call: ServiceCall) -> None:
         start_date, end_date = _period_window(call)
     else:
         start_date, end_date = "0001311400", "9912311400"
-    await _connection_for_device(
-        hass,
-        cast("str", call.data[ATTR_DEVICE_ID]),
-    ).async_add_passcode(
+    connection = await _legacy_connection(hass, cast("str", call.data[ATTR_DEVICE_ID]))
+    await connection.async_add_passcode(
         code,
         pwd_type=pwd_type,
         start_date=start_date,
@@ -169,20 +185,16 @@ async def _async_add_passcode(hass: HomeAssistant, call: ServiceCall) -> None:
 async def _async_delete_passcode(hass: HomeAssistant, call: ServiceCall) -> None:
     code = cast("str", call.data[ATTR_CODE])
     _validate_code(code)
-    await _connection_for_device(
-        hass,
-        cast("str", call.data[ATTR_DEVICE_ID]),
-    ).async_delete_passcode(
+    connection = await _legacy_connection(hass, cast("str", call.data[ATTR_DEVICE_ID]))
+    await connection.async_delete_passcode(
         code,
         pwd_type=PASSCODE_TYPES[cast("str", call.data[ATTR_PASSCODE_TYPE])],
     )
 
 
 async def _async_clear_passcodes(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _connection_for_device(
-        hass,
-        cast("str", call.data[ATTR_DEVICE_ID]),
-    ).async_clear_passcodes()
+    connection = await _legacy_connection(hass, cast("str", call.data[ATTR_DEVICE_ID]))
+    await connection.async_clear_passcodes()
 
 
 async def _async_get_auto_lock(

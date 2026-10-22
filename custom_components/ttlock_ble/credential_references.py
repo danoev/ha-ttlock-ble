@@ -29,12 +29,12 @@ class ProtectedCredentialReference:
 
 class ProtectedCredentialReferences:
     """
-    Lazy private HMAC key storage; no ordinary service or inventory integration.
+    Private HMAC key storage, used only by the separate admin metadata store.
 
-    A future admin mapping flow can derive a lock/method/epoch-bound handle from
+    The admin mapping flow derives a lock/method/epoch-bound handle from
     verified evidence in memory. Raw IDs/PINs are never persisted. Host admins and
     backups can access the private key; this is not encryption from the HA host.
-    Names and identity binding deliberately have no implementation yet.
+    Names are explicit private labels in AccessRecordStore; no identity binding.
     """
 
     def __init__(self, hass: HomeAssistant, entry_id: str) -> None:

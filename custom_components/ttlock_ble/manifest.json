@@ -1,18 +1,22 @@
 {
   "domain": "ttlock_ble",
   "name": "TTLock BLE",
+  "after_dependencies": [
+    "frontend"
+  ],
   "codeowners": [
     "@danoev"
   ],
   "config_flow": true,
   "dependencies": [
-    "bluetooth"
+    "bluetooth",
+    "http"
   ],
   "documentation": "https://github.com/danoev/ha-ttlock-ble",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/danoev/ha-ttlock-ble/issues",
   "requirements": [
-    "ttlock-ble@https://github.com/danoev/ttlock-ble/archive/fda4233d3fb15ed256f5aa66ebd0f971587e4e9e.tar.gz"
+    "ttlock-ble@https://github.com/danoev/ttlock-ble/archive/81c687f76a498cd97ed6287199bedb57f9d9b2fc.tar.gz"
   ],
-  "version": "3.5.1rc15"
+  "version": "3.5.1rc16"
 }
