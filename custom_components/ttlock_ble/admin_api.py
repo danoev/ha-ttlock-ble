@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import callback
 
 from .access import access_capabilities
 from .services import _connection_for_device
+from .validation import vol
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant

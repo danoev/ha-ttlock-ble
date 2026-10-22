@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-import voluptuous as vol
 from homeassistant.helpers import storage
 
 from .credential_references import ProtectedCredentialReferences
+from .validation import vol
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -87,6 +87,7 @@ class AccessRecordStore:
         self._fresh: dict[str, float] = {}
         self._revision: dict[str, int] = {}
         self._confirmed: set[str] = set()
+        self._observed: dict[str, set[str]] = {}
 
     async def async_load(self) -> None:
         """Restart is stale; malformed storage fails closed without data echo."""
@@ -116,6 +117,7 @@ class AccessRecordStore:
         """Invalidate older reads as well as freshness; return an operation ticket."""
         scope = self._scope(lock, method)
         self._fresh.pop(scope, None)
+        self._observed.pop(scope, None)
         self._revision[scope] = self._revision.get(scope, 0) + 1
         return self._revision[scope]
 
@@ -145,7 +147,7 @@ class AccessRecordStore:
         cleaned: bool,
         revision: int | None = None,
     ) -> None:
-        """Complete current reads reconcile presence and retire missing references."""
+        """Reconcile observations; limited PIN coverage cannot retire a reference."""
         scope = self._scope(lock, method)
         if revision is None:
             revision = self.mark_stale(lock, method)
@@ -166,8 +168,9 @@ class AccessRecordStore:
                 scope, {"epoch": secrets.token_hex(16), "records": []}
             )
             records = [PrivateRecord(**item) for item in state["records"]]
-            active = {r.base: r for r in records if r.active}
+            active = {r.base: r for r in records if r.active or method == "keypad_pin"}
             seen = set()
+            observed = set()
             for item in inventory.records:
                 # Include record type in the HMAC domain. Never persist the source ID.
                 base = self._refs.from_verified_record(
@@ -183,10 +186,14 @@ class AccessRecordStore:
                         base, secrets.token_hex(16), item.record_type, item.validity
                     )
                     records.append(record)
+                record.active = True
                 record.validity = item.validity
+                observed.add(record.reference)
             for record in records:
                 if record.base not in seen:
-                    record.active = False
+                    # Cursor completion is not exhaustive PIN discovery. Preserve
+                    # its scoped reference/label across omissions and restarts.
+                    record.active = record.active and method == "keypad_pin"
                     self._confirmed.discard(record.reference)
             # Retain missing references; cap growth without reusing aliases.
             if len(records) > MAX_RECORDS:
@@ -195,6 +202,7 @@ class AccessRecordStore:
             state["records"] = [asdict(r) for r in records]
             await self._save()
             if revision == self._revision.get(scope):
+                self._observed[scope] = observed
                 self._fresh[scope] = monotonic()
 
     def snapshot(self, lock: str, method: str) -> dict[str, Any]:
@@ -214,8 +222,20 @@ class AccessRecordStore:
                     "validity": r["validity"],
                     "schedule_verified": False,
                     "identity_verified": False,
-                    "present": r["active"],
-                    "stale": not fresh or not r["active"],
+                    "present": r["reference"] in self._observed.get(scope, set())
+                    if fresh
+                    else None,
+                    "observation": (
+                        "observed"
+                        if r["reference"] in self._observed.get(scope, set())
+                        else "not_observed"
+                    )
+                    if fresh
+                    else "previously_observed_unverified",
+                    "revocation_verified": False,
+                    "limited_pin_coverage": method == "keypad_pin",
+                    "stale": not fresh
+                    or r["reference"] not in self._observed.get(scope, set()),
                     "alias_confirmed_this_session": r["reference"] in self._confirmed,
                 }
                 for r in state["records"]
@@ -237,7 +257,11 @@ class AccessRecordStore:
                 msg = "Read a fresh inventory before assigning a name"
                 raise ValueError(msg)
             for record in self._scopes[scope]["records"]:
-                if record["reference"] == reference and record["active"]:
+                if (
+                    record["reference"] == reference
+                    and record["active"]
+                    and reference in self._observed.get(scope, set())
+                ):
                     record["alias"] = name.strip()
                     await self._save()
                     self._confirmed.add(reference)
@@ -269,6 +293,7 @@ class AccessRecordStore:
                 scope: revision + 1 for scope, revision in self._revision.items()
             }
             self._fresh.clear()
+            self._observed.clear()
             self._confirmed.clear()
             self._scopes.clear()
             self._legacy_disabled.clear()

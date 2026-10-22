@@ -5,6 +5,8 @@ from datetime import timedelta
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 
+from tests.device_lookup import device_by_identifier
+
 
 async def test_setup_entry_loads_successfully(hass, setup_integration) -> None:
     assert setup_integration.state == ConfigEntryState.LOADED
@@ -306,11 +308,8 @@ async def test_setup_prunes_devices_for_removed_locks(
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert registry.async_get_device(identifiers={(DOMAIN, stale_mac)}) is None
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")})
-        is not None
-    )
+    assert device_by_identifier(registry, (DOMAIN, stale_mac)) is None
+    assert device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff")) is not None
 
 
 async def test_remove_config_entry_device_denies_a_configured_lock(
@@ -323,7 +322,7 @@ async def test_remove_config_entry_device_denies_a_configured_lock(
     from custom_components.ttlock_ble.const import DOMAIN
 
     registry = device_registry.async_get(hass)
-    device = registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")})
+    device = device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff"))
     assert device is not None
     assert not await async_remove_config_entry_device(hass, setup_integration, device)
 
@@ -377,10 +376,7 @@ async def test_reauth_key_refresh_prunes_the_replaced_lock(
     await hass.async_block_till_done()
 
     registry = device_registry.async_get(hass)
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")})
-        is not None
-    )
+    assert device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff")) is not None
 
     replacement_key = replace(
         sample_virtual_key, keyId=2, lockId=43, lockMac="11:22:33:44:55:66"
@@ -395,13 +391,8 @@ async def test_reauth_key_refresh_prunes_the_replaced_lock(
 
     assert result["type"] == "abort"
     assert result["reason"] == "reauth_successful"
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")}) is None
-    )
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "11:22:33:44:55:66")})
-        is not None
-    )
+    assert device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff")) is None
+    assert device_by_identifier(registry, (DOMAIN, "11:22:33:44:55:66")) is not None
 
 
 async def test_failed_platform_setup_still_stops_the_connections(

@@ -91,6 +91,9 @@ async def test_admin_private_records_names_reset_no_service_bus_or_raw_log(
         "present",
         "stale",
         "alias_confirmed_this_session",
+        "observation",
+        "revocation_verified",
+        "limited_pin_coverage",
     }
     response = await client.post(
         URL,
