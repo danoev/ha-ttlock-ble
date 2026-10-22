@@ -1,6 +1,9 @@
 # Changelog
 
-## 3.5.2 (unreleased candidate)
+## 3.5.2rc1 (2026-10-22)
+
+Controlled prerelease for supervised HACS hardware testing. Software validation
+has passed; S31 physical auto-lock and state-display confirmation remain pending.
 
 - Bound and deduplicate delayed connected state verification after an observed
   unlock; cancel follow-up work on confirmation, newer control and unload.

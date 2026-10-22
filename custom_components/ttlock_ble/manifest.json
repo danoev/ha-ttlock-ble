@@ -18,5 +18,5 @@
   "requirements": [
     "ttlock-ble@https://github.com/danoev/ttlock-ble/archive/73e6c89544dd178cb09de9b88f29f5cf204b2429.tar.gz"
   ],
-  "version": "3.5.2"
+  "version": "3.5.2rc1"
 }
