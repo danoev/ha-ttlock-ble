@@ -136,7 +136,7 @@ def test_stable_identity_version_and_hacs_floor_remain_compatible() -> None:
     assert manifest["name"] == "TTLock BLE"
     assert Version(manifest["version"]) > Version("3.5.1rc16")
     assert AwesomeVersion(manifest["version"]) > AwesomeVersion("3.5.1rc16")
-    assert validate_release(_ROOT, "v3.5.2") == "3.5.2"
+    assert validate_release(_ROOT, "v3.5.2rc1") == "3.5.2rc1"
 
 
 def test_hacs_install_zip_contains_only_integration_files_at_root() -> None:
