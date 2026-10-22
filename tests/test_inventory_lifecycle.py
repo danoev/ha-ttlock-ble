@@ -14,10 +14,12 @@ from ttlock_ble import InventoryEntry, InventoryReason, TTLockError
 
 from custom_components.ttlock_ble.connection import TtlockBleConnection
 
+pytestmark = pytest.mark.parametrize("method", ["keypad_pin", "ic_card"])
+
 
 @pytest.mark.parametrize("phase", ["acquisition", "read"])
 async def test_explicit_control_preempts_inventory_read_after_cleanup(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, phase
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, phase, method
 ) -> None:
     started = asyncio.Event()
     order = []
@@ -45,8 +47,10 @@ async def test_explicit_control_preempts_inventory_read_after_cleanup(
         mock_ttlock_client.connect.side_effect = connect
     mock_ttlock_client.disconnect.side_effect = disconnect
     mock_ttlock_client.unlock.side_effect = unlock
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    inventory = asyncio.create_task(conn.async_get_access_inventory("ic_card"))
+    inventory = asyncio.create_task(conn.async_get_access_inventory(method))
     try:
         await started.wait()
         await asyncio.wait_for(conn.async_unlock(), timeout=1)
@@ -62,7 +66,7 @@ async def test_explicit_control_preempts_inventory_read_after_cleanup(
 
 
 async def test_partial_transport_result_does_not_retain_a_healthy_session(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, method
 ) -> None:
     result = SimpleNamespace(
         entries=(InventoryEntry("permanent"),),
@@ -73,8 +77,10 @@ async def test_partial_transport_result_does_not_retain_a_healthy_session(
         reason=InventoryReason.TRANSPORT,
     )
     mock_ttlock_client.get_cards = AsyncMock(return_value=result)
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    assert await conn.async_get_access_inventory("ic_card") is result
+    assert await conn.async_get_access_inventory(method) is result
     mock_ttlock_client.disconnect.assert_awaited_once()
     assert conn._client is None
     assert conn.inventory_diagnostics["reason"] == "transport_interrupted"
@@ -82,7 +88,7 @@ async def test_partial_transport_result_does_not_retain_a_healthy_session(
 
 
 async def test_inventory_is_rejected_while_control_is_in_progress(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, method
 ) -> None:
     started = asyncio.Event()
     release = asyncio.Event()
@@ -92,12 +98,14 @@ async def test_inventory_is_rejected_while_control_is_in_progress(
         await release.wait()
 
     mock_ttlock_client.unlock.side_effect = unlock
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
     control = asyncio.create_task(conn.async_unlock())
     try:
         await started.wait()
         with pytest.raises(TTLockError, match="connection_busy"):
-            await conn.async_get_access_inventory("ic_card")
+            await conn.async_get_access_inventory(method)
     finally:
         release.set()
         await control
@@ -105,9 +113,11 @@ async def test_inventory_is_rejected_while_control_is_in_progress(
 
 
 async def test_inventory_timeout_closes_session_and_suppresses_raw_error(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, method
 ) -> None:
     mock_ttlock_client.get_cards = AsyncMock(side_effect=asyncio.Event().wait)
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
     with (
         patch(
@@ -116,14 +126,14 @@ async def test_inventory_timeout_closes_session_and_suppresses_raw_error(
         ),
         pytest.raises(TTLockError, match="read_deadline_exceeded"),
     ):
-        await conn.async_get_access_inventory("ic_card")
+        await conn.async_get_access_inventory(method)
     mock_ttlock_client.disconnect.assert_awaited_once()
     assert conn._client is None
     assert conn._pending_client is None
 
 
 async def test_repeated_cancellation_keeps_cleanup_owned_before_unlock(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, method
 ) -> None:
     started = asyncio.Event()
     cleanup_started = asyncio.Event()
@@ -139,8 +149,10 @@ async def test_repeated_cancellation_keeps_cleanup_owned_before_unlock(
 
     mock_ttlock_client.get_cards = AsyncMock(side_effect=read)
     mock_ttlock_client.disconnect.side_effect = disconnect
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    inventory = asyncio.create_task(conn.async_get_access_inventory("ic_card"))
+    inventory = asyncio.create_task(conn.async_get_access_inventory(method))
     await started.wait()
     inventory.cancel()
     await cleanup_started.wait()
@@ -161,7 +173,7 @@ async def test_repeated_cancellation_keeps_cleanup_owned_before_unlock(
 
 
 async def test_interrupted_read_retains_failed_cleanup_and_blocks_replacement(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, caplog
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, caplog, method
 ) -> None:
     caplog.set_level(logging.DEBUG)
     result = SimpleNamespace(
@@ -169,8 +181,10 @@ async def test_interrupted_read_retains_failed_cleanup_and_blocks_replacement(
     )
     mock_ttlock_client.get_cards = AsyncMock(return_value=result)
     mock_ttlock_client.disconnect.side_effect = BleakError("synthetic-private-cleanup")
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    assert await conn.async_get_access_inventory("ic_card") is result
+    assert await conn.async_get_access_inventory(method) is result
     assert conn._client is None
     assert conn._pending_client is mock_ttlock_client
     with pytest.raises(TTLockError, match="not reachable"):
@@ -185,7 +199,7 @@ async def test_interrupted_read_retains_failed_cleanup_and_blocks_replacement(
 
 
 async def test_shutdown_cancels_inventory_and_waits_for_cleanup(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, method
 ) -> None:
     started = asyncio.Event()
 
@@ -194,8 +208,10 @@ async def test_shutdown_cancels_inventory_and_waits_for_cleanup(
         await asyncio.Future()
 
     mock_ttlock_client.get_cards = AsyncMock(side_effect=read)
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    inventory = asyncio.create_task(conn.async_get_access_inventory("ic_card"))
+    inventory = asyncio.create_task(conn.async_get_access_inventory(method))
     await started.wait()
     await asyncio.wait_for(conn.async_stop(), timeout=1)
     with pytest.raises(asyncio.CancelledError):
@@ -205,14 +221,16 @@ async def test_shutdown_cancels_inventory_and_waits_for_cleanup(
 
 
 async def test_inventory_failure_does_not_render_raw_traceback(
-    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, caplog
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client, caplog, method
 ) -> None:
     mock_ttlock_client.get_cards = AsyncMock(
         side_effect=OSError("synthetic-secret-frame")
     )
+    if method == "keypad_pin":
+        mock_ttlock_client.get_passcodes = mock_ttlock_client.get_cards
     conn = TtlockBleConnection(hass, sample_virtual_key)
     with pytest.raises(TTLockError) as error:
-        await conn.async_get_access_inventory("ic_card")
+        await conn.async_get_access_inventory(method)
     assert "synthetic-secret-frame" not in "".join(
         traceback.format_exception(error.value)
     )

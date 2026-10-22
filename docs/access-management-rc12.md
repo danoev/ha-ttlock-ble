@@ -8,7 +8,8 @@ IDs or credential slots, and it creates no credential entities or Recorder
 attributes. Inventory needs the stored administrator password; a key without
 one returns `admin_key_required` before BLE acquisition. S31 read evidence now exists: one PIN remains partial, while two fingerprints
 and two cards were completely enumerated and counts corroborated with the app.
-See [RC14 evidence and management foundations](RC14_ACCESS_MANAGEMENT.md).
+See [RC14 evidence and management foundations](RC14_ACCESS_MANAGEMENT.md) and
+[the RC15 exact-termination correction and pending S31 confirmation](RC15_PIN_PAGINATION.md).
 
 | Method | Read | Create | Modify | Delete | Current qualification |
 | --- | --- | --- | --- | --- | --- |

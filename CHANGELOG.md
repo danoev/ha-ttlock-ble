@@ -1,6 +1,17 @@
 # Changelog
 
-## 3.5.1rc14 (unpublished development candidate)
+## 3.5.1rc15 (unpublished pagination candidate)
+
+- Recognise the exact four-byte CMD 07 / SUCCESS terminal demonstrated by
+  upstream's enveloped hardware fixture, instead of accepting arbitrary short replies.
+- Expose only a known-marker predicate for four-byte PIN replies; do not assume
+  the S31's undisclosed bytes or equate an app count with enumeration completion.
+- Preserve partial PIN coverage even after validated cursor termination.
+- Extend synthetic/encrypted pagination and PIN lifecycle/cleanup regression tests.
+- Keep all new writes, identity attribution and Alarmo auto-disarming disabled.
+
+
+## 3.5.1rc14 (published prerelease)
 
 - Classify discovery, GATT, admin, parser, transport and cleanup failures without
   raw frames or credential-bearing exception chains; preserve partial counts.
@@ -37,7 +48,7 @@
 
 This fork-only prerelease series preserves every published tag. **RC1 through
 RC11 remain historical checkpoints; RC12 is the published corrective baseline
-and RC13 is the published inventory prerelease. RC14 is the unpublished diagnostic candidate.** They remain available solely as
+and RC13 is the published inventory prerelease. RC14 is the published diagnostic prerelease; RC15 is the unpublished pagination candidate.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease
