@@ -8,8 +8,8 @@ these lineage-specific development PRs into current SDK main implicitly.
 Metadata is `3.5.1rc16` in manifest, project, lockfile and release manifest.
 The manifest/project/lockfile pin SDK
 `73e6c89544dd178cb09de9b88f29f5cf204b2429`, immutable archive SHA-256
-`64022bf63929045d7b66bd5262573240d3de5096506aa812701058d14ed8c62c`.
-The dependency remains the preserved0.1.11 transport lineage.
+`49ae5d7ccc53c16a96de49089a31ebcbce424d9bbde447263df1b313269cd112`.
+The dependency remains the preserved 0.1.11 transport lineage.
 
 The existing `publish-hacs-zip.yml` runs only on a **published GitHub Release**.
 It archives the exact tag's `custom_components/ttlock_ble` tree at the ZIP root;
