@@ -60,12 +60,13 @@ Local control of TTLock smart locks over Bluetooth, for [Home Assistant](https:/
 
 ## Entities
 
-Each configured lock produces one HA device with four entities:
+Each configured lock produces one HA device with five entities:
 
 | Entity | Domain | Purpose |
 |---|---|---|
 | `lock.<alias>` | `lock` | Locked/unlocked state, with optimistic updates, `locking`/`unlocking` transitional states and a post-command settle window. |
 | `sensor.<alias>_battery` | `sensor` | Battery percentage (diagnostic). |
+| `sensor.<alias>_last_verified_state` | `sensor` | Time of the last connected state query or acknowledged control result; advertisements and failed polls do not refresh it (diagnostic). |
 | `binary_sensor.<alias>_connection` | `binary_sensor` | Live BLE link state (connectivity, diagnostic). |
 | `event.<alias>_log` | `event` | Fires for every new operation-log record read from the lock. |
 
@@ -73,7 +74,7 @@ The event entity classifies each record as `unlock`, `lock`, `unlock_failed`, `p
 
 ## Installation
 
-1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled; after the RC12 GitHub prerelease is published, select `v3.5.1rc12` from the version list. Until then, RC12 is not available for HACS hardware testing. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
+1. Install via HACS using the button above, or add this repo as a custom HACS repository (category: Integration). HACS prereleases require the repository's prerelease switch to be enabled; select the published `v3.5.1rc12` from the version list for RC12 hardware testing. The access-inventory work on this branch is unreleased. If HACS still tracks `roquerodrigo/ha-ttlock-ble`, replace that custom-repository registration with `https://github.com/danoev/ha-ttlock-ble`; the Home Assistant TTLock config entry does not need to be removed.
 2. Restart Home Assistant.
 3. Settings → Devices & Services → Add Integration → **TTLock BLE**.
 4. Choose how the keys are obtained:
@@ -124,6 +125,13 @@ Bluetooth Proxy follow the same path.
 | `ttlock_ble.clear_passcodes` | Irreversibly remove every keypad passcode stored by the lock. |
 | `ttlock_ble.get_auto_lock` | Return `seconds`, the current native auto-lock delay. |
 | `ttlock_ble.set_auto_lock` | Set the native delay; `seconds: 0` disables auto-lock. |
+| `ttlock_ble.get_access_inventory` | Return credential-free counts and coverage limits on demand for `keypad_pin`, `fingerprint` or `ic_card`; requires an administrator key. |
+
+The inventory is not a complete list of who can enter: unused batch/offline
+PINs may be absent, names and identities are unavailable, and eight-byte IC
+cards are unverified. See [access-management status](docs/access-management-rc12.md)
+for method capabilities and the Alarmo security boundary. Automatic Alarmo
+disarming is not enabled.
 
 Temporary windows are interpreted in Home Assistant's configured time zone and
 sent to the lock with minute precision. Correct behaviour therefore depends on
