@@ -1129,7 +1129,7 @@ dev = [
     { name = "pytest-cov", specifier = "==7.1.0" },
     { name = "pytest-homeassistant-custom-component", specifier = "==0.13.354" },
     { name = "serialx", specifier = "==1.8.2" },
-    { name = "ttlock-ble", url = "https://github.com/danoev/ttlock-ble/archive/65a196a4415516039fd98fe40ccdccc7dccfec23.tar.gz" },
+    { name = "ttlock-ble", url = "https://github.com/danoev/ttlock-ble/archive/67bf3b986500bf92106628448166f6d0ca19ab78.tar.gz" },
 ]
 lint = [
     { name = "mypy", specifier = "==2.3.0" },
@@ -2698,14 +2698,14 @@ wheels = [
 [[package]]
 name = "ttlock-ble"
 version = "0.1.11"
-source = { url = "https://github.com/danoev/ttlock-ble/archive/65a196a4415516039fd98fe40ccdccc7dccfec23.tar.gz" }
+source = { url = "https://github.com/danoev/ttlock-ble/archive/67bf3b986500bf92106628448166f6d0ca19ab78.tar.gz" }
 dependencies = [
     { name = "bleak" },
     { name = "bleak-retry-connector" },
     { name = "cryptography" },
     { name = "httpx" },
 ]
-sdist = { hash = "sha256:f6e8e0a42204686d50890ff6d58fe76e5f476ff891b891ecdc0af58529ac7030" }
+sdist = { hash = "sha256:1c19e8d0e4387c44b4768670b0386ee46ffd42293bc603ac899ef75e62d0d193" }
 
 [package.metadata]
 requires-dist = [
