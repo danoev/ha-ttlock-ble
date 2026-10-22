@@ -37,7 +37,13 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from ttlock_ble import KeyboardPwdType, LockState, TTLockClient, TTLockError
+from ttlock_ble import (
+    InventoryResult,
+    KeyboardPwdType,
+    LockState,
+    TTLockClient,
+    TTLockError,
+)
 
 from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
@@ -63,6 +69,8 @@ CACHED_CONNECT_TIMEOUT_SECONDS = 16.0
 FRESH_CONNECT_TIMEOUT_SECONDS = 42.0
 EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS = 60.0
 MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS = 60.0
+INVENTORY_ACQUISITION_TIMEOUT_SECONDS = 16.0
+INVENTORY_OPERATION_TIMEOUT_SECONDS = 30.0
 ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS = 16.0
 UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS = 48.0
 AMBIGUOUS_RECONCILIATION_ACQUISITION_TIMEOUT_SECONDS = 48.0
@@ -110,6 +118,7 @@ class _AcquisitionIntent(Enum):
     ROUTINE_QUERY = "routine_query"
     UNKNOWN_BOOTSTRAP = "unknown_bootstrap"
     MANAGEMENT = "management"
+    INVENTORY = "inventory"
     AMBIGUOUS_RECONCILIATION = "ambiguous_reconciliation"
     OPERATION_LOG = "operation_log"
     BACKGROUND_MAINTENANCE = "background_maintenance"
@@ -121,6 +130,8 @@ def _acquisition_budget(intent: _AcquisitionIntent) -> float:
         return EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS
     if intent is _AcquisitionIntent.MANAGEMENT:
         return MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS
+    if intent is _AcquisitionIntent.INVENTORY:
+        return INVENTORY_ACQUISITION_TIMEOUT_SECONDS
     if intent is _AcquisitionIntent.UNKNOWN_BOOTSTRAP:
         return UNKNOWN_BOOTSTRAP_ACQUISITION_TIMEOUT_SECONDS
     if intent is _AcquisitionIntent.AMBIGUOUS_RECONCILIATION:
@@ -174,6 +185,8 @@ class TtlockBleConnection:
         self._next_client_generation = 0
         self._owned_client_generation: int | None = None
         self._lock = asyncio.Lock()
+        self._inventory_task: asyncio.Task[InventoryResult] | None = None
+        self._control_requests = 0
         self._task: asyncio.Task[None] | None = None
         self._closing = False
         self._closing_event = asyncio.Event()
@@ -219,6 +232,8 @@ class TtlockBleConnection:
         self._closing = True
         self._closing_event.set()
         self._disconnected.set()
+        if self._inventory_task is not None:
+            self._inventory_task.cancel()
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -349,6 +364,65 @@ class TtlockBleConnection:
             active_scan=False,
         )
 
+    @property
+    def inventory_admin_available(self) -> bool:
+        """Do not open a BLE session when this key lacks an admin password."""
+        return bool(self._key.adminPs) and self._key.adminPs.isdecimal()
+
+    async def async_get_access_inventory(self, method: str) -> InventoryResult:
+        """Start one low-priority read, preemptible by explicit bolt control."""
+        if not self.inventory_admin_available:
+            msg = "Credential inventory requires an admin key"
+            raise TTLockError(msg)
+        if method not in {"keypad_pin", "fingerprint", "ic_card"}:
+            msg = "Unknown inventory method"
+            raise ValueError(msg)
+        if self._inventory_task is not None and not self._inventory_task.done():
+            msg = "An inventory read is already active"
+            raise TTLockError(msg)
+        task = self._hass.async_create_task(
+            self._async_read_access_inventory(method),
+            name=f"{DOMAIN}.inventory.{self._key.lockMac}",
+        )
+        self._inventory_task = task
+        try:
+            return await task
+        finally:
+            if self._inventory_task is task and task.done():
+                self._inventory_task = None
+
+    async def _async_read_access_inventory(self, method: str) -> InventoryResult:
+        """Never queue behind control, and close even a partially successful read."""
+        if self._control_requests or self._lock.locked() or self._closing:
+            msg = "Inventory unavailable while another operation is active"
+            raise TTLockError(msg)
+        async with self._lock:
+            try:
+                # Acquisition and all pages share one deadline, excluding mandatory
+                # owned cleanup. Explicit control can cancel either phase sooner.
+                async with asyncio.timeout(INVENTORY_OPERATION_TIMEOUT_SECONDS):
+                    client = await self._async_ensure_connected_locked(
+                        active_scan=True,
+                        intent=_AcquisitionIntent.INVENTORY,
+                        reason="read-only access inventory",
+                    )
+                    if client is None:
+                        msg = "Inventory could not acquire a Bluetooth connection"
+                        raise TTLockError(msg)  # noqa: TRY301
+                    if method == "keypad_pin":
+                        return await client.get_passcodes()
+                    if method == "fingerprint":
+                        return await client.get_fingerprints()
+                    return await client.get_cards()
+            except Exception:  # noqa: BLE001
+                # Never render transport exceptions or credential-bearing causes.
+                msg = "Access inventory read failed"
+                raise TTLockError(msg) from None
+            finally:
+                # Cancellation also reaches this path. RC12 retains uncertain
+                # backend ownership and blocks replacement until cleanup is proven.
+                await self._async_disconnect_locked(reason="access inventory complete")
+
     async def async_get_operation_log(self) -> list[LogEntry]:
         """
         Fetch operation records from the lock and dispatch the new ones.
@@ -405,6 +479,16 @@ class TtlockBleConnection:
         return new_entries
 
     async def _async_run_command(self, action: str) -> None:
+        """Give explicit control priority over any read-only inventory task."""
+        self._control_requests += 1
+        try:
+            if self._inventory_task is not None:
+                self._inventory_task.cancel()
+            await self._async_run_control_command(action)
+        finally:
+            self._control_requests -= 1
+
+    async def _async_run_control_command(self, action: str) -> None:
         """
         Acquire the lock, ensure connected, then call `lock`/`unlock`.
 
@@ -1077,23 +1161,24 @@ class TtlockBleConnection:
             )
         try:
             await client.disconnect()
-        except Exception:  # noqa: BLE001 -- cleanup failure must not mask outcome
+        except Exception as exc:  # noqa: BLE001 -- cleanup failure must not mask outcome
             if self._client_is_disconnected(client):
                 LOGGER.debug(
-                    "BLE candidate cleanup raised after disconnect for %s (reason=%s)",
+                    "BLE candidate cleanup raised after disconnect for %s "
+                    "(reason=%s, error_type=%s)",
                     self._key.lockMac,
                     reason,
-                    exc_info=True,
+                    type(exc).__name__,
                 )
                 return _CleanupResult(
                     elapsed=monotonic() - cleanup_started,
                     succeeded=True,
                 )
             LOGGER.debug(
-                "BLE candidate cleanup failed for %s (reason=%s)",
+                "BLE candidate cleanup failed for %s (reason=%s, error_type=%s)",
                 self._key.lockMac,
                 reason,
-                exc_info=True,
+                type(exc).__name__,
             )
             return _CleanupResult(
                 elapsed=monotonic() - cleanup_started,

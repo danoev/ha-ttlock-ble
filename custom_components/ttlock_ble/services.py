@@ -14,7 +14,7 @@ from homeassistant.helpers.device_registry import async_get as async_get_device_
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.util import dt as dt_util
 
-from ttlock_ble import KeyboardPwdType
+from ttlock_ble import InventoryResult, KeyboardPwdType
 
 from .const import DOMAIN
 
@@ -31,6 +31,7 @@ SERVICE_DELETE_PASSCODE = "delete_passcode"
 SERVICE_CLEAR_PASSCODES = "clear_passcodes"
 SERVICE_GET_AUTO_LOCK = "get_auto_lock"
 SERVICE_SET_AUTO_LOCK = "set_auto_lock"
+SERVICE_GET_ACCESS_INVENTORY = "get_access_inventory"
 
 ATTR_DEVICE_ID = "device_id"
 ATTR_CODE = "code"
@@ -38,6 +39,9 @@ ATTR_PASSCODE_TYPE = "type"
 ATTR_START = "start"
 ATTR_END = "end"
 ATTR_SECONDS = "seconds"
+ATTR_METHOD = "method"
+
+INVENTORY_METHODS = ("keypad_pin", "fingerprint", "ic_card")
 
 PASSCODE_TYPE_PERMANENT = "permanent"
 PASSCODE_TYPE_PERIOD = "period"
@@ -79,6 +83,12 @@ SET_AUTO_LOCK_SCHEMA = vol.Schema(
         vol.Required(ATTR_SECONDS): vol.All(
             vol.Coerce(int), vol.Range(min=0, max=0xFFFF)
         ),
+    }
+)
+GET_ACCESS_INVENTORY_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_DEVICE_ID): cv.string,
+        vol.Required(ATTR_METHOD): vol.In(INVENTORY_METHODS),
     }
 )
 
@@ -189,6 +199,65 @@ async def _async_set_auto_lock(hass: HomeAssistant, call: ServiceCall) -> None:
     ).async_set_auto_lock_time(cast("int", call.data[ATTR_SECONDS]))
 
 
+def _inventory_response(method: str, result: InventoryResult) -> ServiceResponse:
+    """Return only counts and classified validity, never credential material."""
+    validity_counts: dict[str, int] = {}
+    for item in result.entries:
+        validity_counts[item.validity] = validity_counts.get(item.validity, 0) + 1
+    return cast(
+        "ServiceResponse",
+        {
+            "method": method,
+            "read_status": "partial"
+            if method == "keypad_pin"
+            or not result.complete
+            or result.skipped_unknown
+            or result.transport_interrupted
+            else "supported",
+            "count": len(result.entries),
+            "validity_counts": validity_counts,
+            "enumeration_complete": result.complete,
+            "transport_interrupted": result.transport_interrupted,
+            "skipped_unknown_layouts": result.skipped_unknown,
+            "limitation": result.limitation,
+            "credential_names": "unavailable",
+            "create_capability": "supported"
+            if method == "keypad_pin"
+            else "unsupported",
+            "modify_capability": "unsupported",
+            "delete_capability": "supported"
+            if method == "keypad_pin"
+            else "unsupported",
+        },
+    )
+
+
+async def _async_get_access_inventory(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """Read one method on demand; do not persist identifiers in HA entities."""
+    method = cast("str", call.data[ATTR_METHOD])
+    connection = _connection_for_device(hass, cast("str", call.data[ATTR_DEVICE_ID]))
+    if not connection.inventory_admin_available:
+        return cast(
+            "ServiceResponse",
+            {
+                "method": method,
+                "read_status": "unverified",
+                "reason": "admin_key_required",
+            },
+        )
+    try:
+        result = await connection.async_get_access_inventory(method)
+    except Exception:  # noqa: BLE001
+        # Credential-safe response; asyncio cancellation still propagates.
+        return cast(
+            "ServiceResponse",
+            {"method": method, "read_status": "unverified", "reason": "read_failed"},
+        )
+    return _inventory_response(method, result)
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register local management actions once for the integration."""
     if hass.services.has_service(DOMAIN, SERVICE_ADD_PASSCODE):
@@ -223,4 +292,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         SERVICE_SET_AUTO_LOCK,
         partial(_async_set_auto_lock, hass),
         schema=SET_AUTO_LOCK_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_ACCESS_INVENTORY,
+        partial(_async_get_access_inventory, hass),
+        schema=GET_ACCESS_INVENTORY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )

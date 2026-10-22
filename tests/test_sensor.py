@@ -1,17 +1,25 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 async def test_battery_sensor_created_for_each_key(hass, setup_integration) -> None:
-    assert len(hass.states.async_all("sensor")) == 1
+    assert len(hass.states.async_all("sensor")) == 2
+
+
+def _battery_state(hass):
+    return next(
+        state
+        for state in hass.states.async_all("sensor")
+        if state.attributes.get("device_class") == "battery"
+    )
 
 
 async def test_battery_sensor_reports_coordinator_value(
     hass,
     setup_integration,
 ) -> None:
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     assert state.state == "80"
 
 
@@ -19,7 +27,7 @@ async def test_battery_sensor_unit_and_device_class(
     hass,
     setup_integration,
 ) -> None:
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     assert state.attributes["unit_of_measurement"] == "%"
     assert state.attributes["device_class"] == "battery"
     assert state.attributes["state_class"] == "measurement"
@@ -50,7 +58,7 @@ async def test_battery_sensor_unknown_when_coordinator_returns_none(
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     assert state.state in ("unknown", "unavailable")
 
 
@@ -61,7 +69,7 @@ async def test_battery_sensor_has_unique_id(
 ) -> None:
     from homeassistant.helpers import entity_registry as er
 
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     registry = er.async_get(hass)
     entry = registry.async_get(state.entity_id)
     assert entry is not None
@@ -80,7 +88,7 @@ async def test_battery_sensor_updates_from_push_event(
 
     from custom_components.ttlock_ble.connection import event_signal
 
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     assert state.state == "80"
     mock_ttlock_connection.async_query_state = AsyncMock(return_value=None)
     pushed = LockEvent.from_payload(0x14, 1, bytes.fromhex("2a0102"))  # battery=0x2a
@@ -104,7 +112,7 @@ async def test_battery_sensor_ignores_push_event_without_battery(
 
     from custom_components.ttlock_ble.connection import event_signal
 
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     assert state.state == "80"
     async_dispatcher_send(
         hass,
@@ -121,7 +129,7 @@ async def test_battery_sensor_is_diagnostic(
 ) -> None:
     from homeassistant.helpers import entity_registry as er
 
-    state = hass.states.async_all("sensor")[0]
+    state = _battery_state(hass)
     registry = er.async_get(hass)
     entry = registry.async_get(state.entity_id)
     assert entry is not None
@@ -149,3 +157,32 @@ def test_battery_sync_from_coordinator_no_snapshot_keeps_value(
     entity._attr_native_value = 64
     entity._sync_from_coordinator()
     assert entity.native_value == 64
+
+
+def test_last_verified_state_only_uses_authoritative_attribution(
+    hass, sample_virtual_key
+) -> None:
+    """Advertisement hints and failed reads cannot refresh state freshness."""
+    from datetime import timedelta
+
+    from custom_components.ttlock_ble.coordinator import TtlockBleDataUpdateCoordinator
+    from custom_components.ttlock_ble.sensor import TtlockBleLastVerifiedStateSensor
+
+    coordinator = TtlockBleDataUpdateCoordinator(hass, timedelta(seconds=30), {})
+    sensor = TtlockBleLastVerifiedStateSensor(coordinator, sample_virtual_key)
+    mac = sample_virtual_key.lockMac
+    assert sensor.native_value is None
+    coordinator.async_apply_authoritative_state(
+        mac, locked=True, battery_level=80, source="query", rssi=-70
+    )
+    verified = sensor.native_value
+    assert verified is not None
+    attribution = coordinator.state_attribution(mac)
+    advertisement = MagicMock()
+    advertisement.lock_state.name = "LOCKED"
+    advertisement.has_new_records = False
+    advertisement.is_setting_mode = False
+    advertisement.battery = 80
+    coordinator.async_apply_advertisement(mac, advertisement, rssi=-60)
+    assert coordinator.state_attribution(mac) is attribution
+    assert abs((sensor.native_value - verified).total_seconds()) < 1

@@ -102,3 +102,27 @@ set_auto_lock:
           max: 65535
           unit_of_measurement: s
           mode: box
+
+get_access_inventory:
+  name: Read access inventory
+  description: >-
+    Read only credential-free counts for one access method over Bluetooth.
+    PIN coverage is incomplete, and card/fingerprint cyclic restrictions are
+    not visible. Runs only when the lock is idle; Lock/Unlock takes priority.
+    This does not enumerate every credential or change access.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    method:
+      name: Access method
+      required: true
+      selector:
+        select:
+          options:
+            - keypad_pin
+            - fingerprint
+            - ic_card
