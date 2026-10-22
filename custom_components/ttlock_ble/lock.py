@@ -65,15 +65,9 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
     would be a guess.
 
     Settled state is reported via `_attr_is_locked`. It is updated:
-    - On every coordinator refresh that returned a known lock state —
-      which includes the state decoded from the lock's advertisements,
-      the only channel that reports an auto-lock.
+    - On every coordinator refresh that returned a known connected query.
     - Optimistically the moment `async_lock`/`async_unlock` succeed.
-    - On every push event the SDK forwards (keypad, fingerprint,
-      auto-lock): the SDK keeps the BLE link alive for a configurable
-      window after each command, so those pushes arrive in real time.
-    - On a forced re-query triggered by any push event, as a sanity
-      check against losing or misreading a notification.
+    - On a forced connected re-query triggered by any push-event hint.
 
     The post-command settle window (`COMMAND_SETTLE_SECONDS`) discards
     state readings that disagree with the just-commanded state during
@@ -125,13 +119,12 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
     @callback
     def _on_lock_event(self, event: LockEvent) -> None:
         """
-        Apply lock state directly from a push notification.
+        Treat a push notification as an activity hint and query fresh state.
 
-        The 3-byte heartbeat push (cmd_echo=0x14) already carries the
-        decoded `lock_state` (0 = locked, 1 = unlocked) — adopt it
-        without a follow-up query. The 15-byte log-entry variant has
-        no `lock_state`; for those (and any unknown opcode that might
-        still signify a change) we fall back to a forced re-query.
+        The decoded state on the 3-byte heartbeat is not authoritative bolt
+        position on all supported lock firmware. The 15-byte log-entry variant
+        has no state at all. Both forms therefore request a connected state
+        query instead of writing the push hint directly to Home Assistant.
         """
         LOGGER.debug(
             "Event-driven update for %s (cmd_echo=0x%02x status=%d lock_state=%s)",
@@ -141,11 +134,22 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
             event.lock_state,
         )
         if event.lock_state is not None:
-            self._apply_lock_state(event.lock_state)
-            return
+            LOGGER.debug(
+                "Push state hint for %s (source=push, hint=%s); "
+                "requesting authoritative query",
+                self._key.lockMac,
+                event.lock_state.name,
+            )
         self._async_create_tracked_task(self._async_query_and_apply(), "query_state")
 
-    def _apply_lock_state(self, raw_state: LockState) -> None:
+    def _apply_lock_state(
+        self,
+        raw_state: LockState,
+        *,
+        source: str,
+        observed_at: float | None = None,
+        rssi: int | None = None,
+    ) -> bool:
         """Write `raw_state` onto `_attr_is_locked` respecting the settle window."""
         # `==`, not `is`: callers may hand us the plain int the wire carried
         # rather than the enum member, and identity would silently say False.
@@ -156,9 +160,40 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
                 "lock" if new_locked else "unlock",
                 self._key.lockMac,
             )
-            return
-        self._attr_is_locked = new_locked
+            return False
+        self._set_authoritative_state(
+            locked=new_locked,
+            source=source,
+            observed_at=observed_at,
+            rssi=rssi,
+        )
         self._write_state_if_added()
+        return True
+
+    def _set_authoritative_state(
+        self,
+        *,
+        locked: bool,
+        source: str,
+        observed_at: float | None = None,
+        rssi: int | None = None,
+    ) -> None:
+        """Apply state and log every transition with safe source attribution."""
+        previous = self._attr_is_locked
+        if previous != locked:
+            age = (
+                0.0 if observed_at is None else max(time.monotonic() - observed_at, 0.0)
+            )
+            LOGGER.debug(
+                "State transition for %s: %s -> %s (source=%s, age=%.1fs, RSSI=%s)",
+                self._key.lockMac,
+                _state_label(previous),
+                _state_label(locked),
+                source,
+                age,
+                rssi if rssi is not None else "unknown",
+            )
+        self._attr_is_locked = locked
 
     def _sync_from_coordinator(self) -> None:
         """
@@ -183,7 +218,15 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
                 self._key.lockMac,
             )
             return
-        self._attr_is_locked = locked
+        attribution = self.coordinator.state_attribution(self._key.lockMac)
+        self._set_authoritative_state(
+            locked=locked,
+            source=attribution.source
+            if attribution is not None
+            else "coordinator_snapshot",
+            observed_at=attribution.observed_at if attribution is not None else None,
+            rssi=attribution.rssi if attribution is not None else None,
+        )
 
     async def async_lock(self, **kwargs: Any) -> None:  # noqa: ARG002
         """Send LOCK over the persistent BLE connection."""
@@ -227,8 +270,19 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
                 msg = f"Failed to {action} {self._key.lockMac}: {exc}"
                 raise HomeAssistantError(msg) from exc
             else:
-                self._attr_is_locked = action == "lock"
+                self._set_authoritative_state(
+                    locked=action == "lock",
+                    source="command",
+                    rssi=self._connection.last_connection_rssi,
+                )
                 self._settle_until = time.monotonic() + COMMAND_SETTLE_SECONDS
+                self.coordinator.async_apply_authoritative_state(
+                    self._key.lockMac,
+                    locked=action == "lock",
+                    battery_level=None,
+                    source="command",
+                    rssi=self._connection.last_connection_rssi,
+                )
             finally:
                 self._clear_in_flight()
                 self._write_state_if_added()
@@ -286,6 +340,23 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
                 self._key.lockMac,
             )
             return
-        raw_state, _battery = result
-        if raw_state is not None:
-            self._apply_lock_state(raw_state)
+        raw_state, battery = result
+        if raw_state is not None and self._apply_lock_state(
+            raw_state,
+            source="query_after_push",
+            rssi=self._connection.last_connection_rssi,
+        ):
+            self.coordinator.async_apply_authoritative_state(
+                self._key.lockMac,
+                locked=raw_state == LockState.LOCKED,
+                battery_level=battery,
+                source="query_after_push",
+                rssi=self._connection.last_connection_rssi,
+            )
+
+
+def _state_label(locked: bool | None) -> str:  # noqa: FBT001
+    """Return a stable log label for a tri-state lock value."""
+    if locked is None:
+        return "UNKNOWN"
+    return "LOCKED" if locked else "UNLOCKED"

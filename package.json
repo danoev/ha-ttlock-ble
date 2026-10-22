@@ -1,0 +1,6 @@
+{
+  "name": "ttlock-ble-admin-tests",
+  "private": true,
+  "scripts": {"test:frontend": "node tests/frontend/administration.mjs"},
+  "devDependencies": {"playwright": "1.62.1"}
+}

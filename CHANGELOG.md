@@ -1,5 +1,138 @@
 # Changelog
 
+## 3.5.1 (2026-10-22)
+
+First stable independently maintained **TTLock BLE (danoev)** distribution,
+derived from Rodrigo Roque's original MIT-licensed integration and SDK; original
+copyright and authorship remain preserved. Rodrigo does not support this fork.
+
+- Retain the RC16 local BLE control, priority/bounds, authoritative state,
+  read-only inventories, private administrator panel and persistent labels.
+- Preserve scoped last-known records/names after failed HTTP/Bluetooth reads;
+  show unverified evidence and disable stale naming without implying deletion.
+- Keep limited PIN references/labels across empty or omitted records and restart;
+  completed cursor traversal is not exhaustive PIN coverage or revocation proof.
+- Distinguish fresh observation, unverified history and non-observation. No new
+  credential create/modify/delete workflow or verified person identity is enabled.
+- Keep legacy PIN services compatible by default, with explicit non-confidential
+  event/trace warnings and a persistent administrator per-lock opt-out.
+- Name the HACS repository TTLock BLE (danoev); preserve the repository, domain,
+  config entries, unique/entity IDs and version-1 private metadata schema.
+- Load the panel from a stable-specific module URL and make optional newer HA
+  Bluetooth diagnostics non-blocking on the declared minimum HA release.
+- Validate the current HA development baseline, browser failures, API/persistence
+  recovery and upgrade identity. Existing released tags/assets are unchanged.
+- Submit focused PIN-safe diagnostics upstream as
+  [SDK PR #101](https://github.com/roquerodrigo/ttlock-ble/pull/101), based directly
+  on original SDK main; do not migrate the preserved fork SDK transport lineage.
+
+PIN offline/batch coverage, full schedules, household identity, new physical
+credential management and actual GATT-backend attribution remain unverified.
+Automatic Alarmo disarming remains disabled. See [stable limits](docs/STABLE_3.5.1.md).
+
+## 3.5.1rc16 (published prerelease)
+
+- Add a local admin-only HTTP/sidebar panel for private individual references,
+  explicit labels, freshness/presence lifecycle and local reset; no secret entry.
+- Keep public inventories credential-free; require complete reads and confirmed
+  cleanup for fresh references. Preserve preemption and all RC12 ownership rules.
+- Add explicit per-lock legacy PIN-service opt-out and honest privacy warnings;
+  service-event/Recorder/trace exposure cannot be fixed inside a handler.
+- Record the supplied positive S31 PIN traversal evidence (1 PIN, 4,340ms), plus
+  fingerprint2/card2 corroboration. PIN offline/batch coverage remains partial.
+- Pin the exact RC16 SDK: private in-memory records and offline write candidates
+  only. New credential writes and Alarmo auto-disarming remain disabled.
+
+## 3.5.1rc15 (published prerelease)
+
+- Recognise the exact four-byte CMD 07 / SUCCESS terminal demonstrated by
+  upstream's enveloped hardware fixture, instead of accepting arbitrary short replies.
+- Expose only a known-marker predicate for four-byte PIN replies; do not assume
+  the S31's undisclosed bytes or equate an app count with enumeration completion.
+- Preserve partial PIN coverage even after validated cursor termination.
+- Extend synthetic/encrypted pagination and PIN lifecycle/cleanup regression tests.
+- Keep all new writes, identity attribution and Alarmo auto-disarming disabled.
+
+
+## 3.5.1rc14 (published prerelease)
+
+- Classify discovery, GATT, admin, parser, transport and cleanup failures without
+  raw frames or credential-bearing exception chains; preserve partial counts.
+- Add safe PIN page/response-shape metadata without guessing S31 termination.
+- Distinguish advertisement scanner from unverified GATT backend attribution.
+- Add administrator-only metadata and dormant private credential-reference
+  groundwork; no new secret submission interface or credential writes.
+- Record S31 hardware-correlated fingerprint/card counts and partial PIN evidence.
+- Preserve inventory preemption, budgets, cleanup ownership and single-send control.
+
+
+## 3.5.1rc13 (published prerelease)
+
+- Add on-demand credential-free PIN, fingerprint and four-byte IC-card summaries.
+- Mark incomplete coverage and transport interruption explicitly.
+- Let explicit Lock/Unlock preempt inventory acquisition and reading; cap the
+  combined read operation at 30 seconds with a 16-second acquisition budget.
+- Always tear down the inventory session and retain uncertain cleanup ownership.
+- Suppress raw inventory transport exception chains, including admin challenges.
+- Add a last-authoritative-state timestamp for stale-state diagnostics.
+- Document HA service-event, Recorder and automation-trace exposure of existing
+  PIN write inputs; keep new credential writes and Alarmo auto-disarm disabled.
+
+## 3.5.1rc12 (local corrective candidate)
+
+- Order authoritative state observations per lock before multi-lock aggregation.
+- Require explicit SDK cleanup evidence and retain pending backend ownership.
+- Redact credential-bearing SDK payload diagnostics.
+- Require matching release tag, source, project, release metadata, lock and ZIP versions.
+- Pin and verify the hosted immutable SDK corrective commit and its real archive hash.
+
+
+## 3.5.1 hardware-validation development series
+
+This fork-only prerelease series preserves every published tag. **RC1 through
+RC11 remain historical checkpoints; RC12 is the published corrective baseline
+and RC13 is the published inventory prerelease. RC14 is the published diagnostic prerelease; RC15 is the unpublished pagination candidate.** They remain available solely as
+reproducible development artefacts and their tag history has not been rewritten.
+
+- **RC1** established the isolated hardware-validation branch and prerelease
+  packaging without merging the management branch.
+- **RC2** added Home Assistant Bluetooth reachability diagnostics to missing
+  connectable-device failures, with credential-redaction coverage.
+- **RC3** added bounded HA-managed active acquisition for explicit lock/unlock,
+  passcode, and auto-lock operations.
+- **RC4** refined candidate acquisition and lifecycle handling while preserving
+  the passive/background paths.
+- **RC5** accepted HA per-scanner local/proxy routes before active acquisition;
+  real hardware then proved 6/6 cold-idle physical commands, while exposing
+  false acknowledgement failures, false state reversal, and log backlog flood.
+- **RC6** distinguishes pre-write failure from an ambiguous completed control
+  write, never resends ambiguous lock/unlock, reconciles only through one fresh
+  connected state query, makes advertisement/push state non-authoritative,
+  attributes state transitions, seeds every historical log page silently, and
+  uses an exact-address HA Auto-mode active window with a Passive tracker.
+- **RC7** uses that same bounded, exact-address HA Auto-mode acquisition for an
+  authoritative startup query while state is Unknown. Explicit entity refreshes
+  and changed advertisement hints can request the same path, while known-state
+  routine polling and background maintenance remain non-active.
+- **RC8** treats a failed pre-command cached/per-scanner GATT route as stale for
+  that acquisition and performs exactly one fresh HA-managed Active fallback.
+  Replayed history is rejected by receipt time, the accepted callback supplies
+  the retry route directly, and control commands remain single-send.
+- **RC9** prevents HA's unchanged-advertisement deduplication from starving that
+  fallback. It clears exact-address dedup history before the bounded wait,
+  accepts only device-cadence-bounded recent callbacks, and scans before GATT
+  when learned timing proves aggregate connectable history stale.
+- **RC10** publishes authoritative state before supplementary log retrieval,
+  preserves last-known state/battery across a failed poll, reacts to decoded
+  state/new-record advertisement hints, persists a conservative bounded log
+  replay journal, and makes five-minute reconnect maintenance opt-in. A cached
+  route receives one speculative connector attempt before RC9's single fresh
+  fallback; the fresh route retains the robust three-attempt SDK policy.
+  Operation events gain safe method attribution, while the SDK's overloaded
+  credential field is no longer exported to Recorder. HACS releases use the
+  fork-owned `ttlock_ble.zip` install asset rather than depending on upstream
+  packaging infrastructure.
+
 ## [3.5.0](https://github.com/roquerodrigo/ha-ttlock-ble/compare/v3.4.0...v3.5.0) (2026-08-07)
 
 

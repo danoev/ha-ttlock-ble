@@ -1,0 +1,128 @@
+add_passcode:
+  name: Add passcode
+  description: "Legacy PIN write. Not confidential: HA service events, Recorder and automation traces may retain the code before the handler. Disable in the TTLock access admin panel if unused."
+  fields:
+    device_id:
+      name: Device
+      description: TTLock device to update.
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    code:
+      name: Passcode
+      description: "A 4-9 digit passcode. HA may retain this service input in events and traces; the password selector does not prevent recording."
+      required: true
+      selector:
+        text:
+          type: password
+    type:
+      name: Access type
+      required: true
+      selector:
+        select:
+          options:
+            - permanent
+            - period
+    start:
+      name: Starts
+      description: Required for period passcodes; interpreted in the Home Assistant time zone.
+      selector:
+        datetime:
+    end:
+      name: Ends
+      description: Required for period passcodes; interpreted in the Home Assistant time zone.
+      selector:
+        datetime:
+
+delete_passcode:
+  name: Delete passcode
+  description: "Legacy PIN write. HA may retain the submitted code in service events, Recorder and traces. Not a confidential management interface."
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    code:
+      name: Passcode
+      required: true
+      selector:
+        text:
+          type: password
+    type:
+      name: Access type
+      required: true
+      selector:
+        select:
+          options:
+            - permanent
+            - period
+
+clear_passcodes:
+  name: Clear passcodes
+  description: "Legacy destructive PIN write: removes all stored keypad passcodes. Can be explicitly disabled per lock in TTLock access."
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+
+get_auto_lock:
+  name: Get auto-lock delay
+  description: Read the native auto-lock delay from the lock.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+
+set_auto_lock:
+  name: Set auto-lock delay
+  description: Set the native auto-lock delay. Use zero to disable auto-lock.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    seconds:
+      name: Delay
+      description: Seconds before the lock re-locks; zero disables auto-lock.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          unit_of_measurement: s
+          mode: box
+
+get_access_inventory:
+  name: Read access inventory
+  description: >-
+    Read only credential-free counts for one access method over Bluetooth.
+    PIN coverage is incomplete, and card/fingerprint cyclic restrictions are
+    not visible. Runs only when the lock is idle; Lock/Unlock takes priority.
+    This does not enumerate every credential or change access.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        device:
+          integration: ttlock_ble
+    method:
+      name: Access method
+      required: true
+      selector:
+        select:
+          options:
+            - keypad_pin
+            - fingerprint
+            - ic_card

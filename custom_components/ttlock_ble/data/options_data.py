@@ -10,4 +10,5 @@ class TtlockBleOptionsData(TypedDict, total=False):
 
     scan_interval: NotRequired[int]
     reconnect_interval: NotRequired[int]
+    background_maintenance: NotRequired[bool]
     permanent_connection: NotRequired[bool]

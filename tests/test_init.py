@@ -5,6 +5,8 @@ from datetime import timedelta
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 
+from tests.device_lookup import device_by_identifier
+
 
 async def test_setup_entry_loads_successfully(hass, setup_integration) -> None:
     assert setup_integration.state == ConfigEntryState.LOADED
@@ -53,7 +55,47 @@ async def test_runtime_data_populated(
 async def test_setup_starts_each_connection(
     hass, setup_integration, mock_ttlock_connection
 ) -> None:
-    mock_ttlock_connection.async_start.assert_awaited()
+    mock_ttlock_connection.async_start.assert_awaited_once_with(maintain=False)
+
+
+async def test_startup_bootstraps_unknown_state_with_active_acquisition(
+    hass,
+    setup_integration,
+    mock_ttlock_connection,
+) -> None:
+    """The first coordinator refresh is active-capable while state is Unknown."""
+    mock_ttlock_connection.async_query_state.assert_awaited_once_with(active_scan=True)
+    assert hass.states.async_all("lock")[0].state == "locked"
+
+
+async def test_startup_active_acquisition_timeout_leaves_state_unknown(
+    hass,
+    sample_stored_key,
+    enable_bluetooth,
+    enable_custom_integrations,
+    mock_cloud,
+    mock_ttlock_connection,
+) -> None:
+    """A failed bounded bootstrap must not invent a physical lock state."""
+    from unittest.mock import AsyncMock
+
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.ttlock_ble.const import DOMAIN
+
+    mock_ttlock_connection.async_query_state = AsyncMock(return_value=None)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"username": "u", "password": "p", "keys": [sample_stored_key]},
+        unique_id="u",
+    )
+    entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    mock_ttlock_connection.async_query_state.assert_awaited_once_with(active_scan=True)
+    assert hass.states.async_all("lock")[0].state == "unknown"
 
 
 async def test_setup_registers_bluetooth_callback_per_lock(
@@ -179,11 +221,16 @@ async def test_scan_interval_picks_up_options(
 
 
 @pytest.mark.parametrize(
-    ("options", "expected_cooldown"),
+    ("options", "expected_cooldown", "expected_maintenance"),
     [
-        ({}, 300.0),
-        ({"reconnect_interval": 120}, 120.0),
-        ({"reconnect_interval": 120, "permanent_connection": True}, 0.0),
+        ({}, 300.0, False),
+        ({"reconnect_interval": 120}, 120.0, True),
+        (
+            {"reconnect_interval": 120, "background_maintenance": False},
+            120.0,
+            False,
+        ),
+        ({"reconnect_interval": 120, "permanent_connection": True}, 0.0, True),
     ],
 )
 async def test_reconnect_options_reach_the_connections(
@@ -194,6 +241,7 @@ async def test_reconnect_options_reach_the_connections(
     mock_cloud,
     options,
     expected_cooldown,
+    expected_maintenance,
 ) -> None:
     """The configured cooldown is handed to every connection; permanent wins."""
     from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -223,6 +271,10 @@ async def test_reconnect_options_reach_the_connections(
             hass,
             ANY,
             reconnect_cooldown_seconds=expected_cooldown,
+            log_history=ANY,
+        )
+        instance.async_start.assert_awaited_once_with(
+            maintain=expected_maintenance,
         )
 
 
@@ -256,11 +308,8 @@ async def test_setup_prunes_devices_for_removed_locks(
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert registry.async_get_device(identifiers={(DOMAIN, stale_mac)}) is None
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")})
-        is not None
-    )
+    assert device_by_identifier(registry, (DOMAIN, stale_mac)) is None
+    assert device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff")) is not None
 
 
 async def test_remove_config_entry_device_denies_a_configured_lock(
@@ -273,7 +322,7 @@ async def test_remove_config_entry_device_denies_a_configured_lock(
     from custom_components.ttlock_ble.const import DOMAIN
 
     registry = device_registry.async_get(hass)
-    device = registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")})
+    device = device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff"))
     assert device is not None
     assert not await async_remove_config_entry_device(hass, setup_integration, device)
 
@@ -327,10 +376,7 @@ async def test_reauth_key_refresh_prunes_the_replaced_lock(
     await hass.async_block_till_done()
 
     registry = device_registry.async_get(hass)
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")})
-        is not None
-    )
+    assert device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff")) is not None
 
     replacement_key = replace(
         sample_virtual_key, keyId=2, lockId=43, lockMac="11:22:33:44:55:66"
@@ -345,13 +391,8 @@ async def test_reauth_key_refresh_prunes_the_replaced_lock(
 
     assert result["type"] == "abort"
     assert result["reason"] == "reauth_successful"
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")}) is None
-    )
-    assert (
-        registry.async_get_device(identifiers={(DOMAIN, "11:22:33:44:55:66")})
-        is not None
-    )
+    assert device_by_identifier(registry, (DOMAIN, "aa:bb:cc:dd:ee:ff")) is None
+    assert device_by_identifier(registry, (DOMAIN, "11:22:33:44:55:66")) is not None
 
 
 async def test_failed_platform_setup_still_stops_the_connections(
