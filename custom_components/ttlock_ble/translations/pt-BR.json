@@ -162,6 +162,9 @@
     "sensor": {
       "battery": {
         "name": "Bateria"
+      },
+      "last_verified_state": {
+        "name": "Último estado verificado"
       }
     }
   }

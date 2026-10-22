@@ -4,7 +4,7 @@ import pytest
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.service import async_get_all_descriptions
-from ttlock_ble import KeyboardPwdType
+from ttlock_ble import InventoryEntry, InventoryResult, KeyboardPwdType, TTLockError
 
 from custom_components.ttlock_ble.const import DOMAIN
 from custom_components.ttlock_ble.services import async_setup_services
@@ -25,6 +25,7 @@ async def test_management_services_are_registered(hass, setup_integration) -> No
         "clear_passcodes",
         "get_auto_lock",
         "set_auto_lock",
+        "get_access_inventory",
     ):
         assert hass.services.has_service(DOMAIN, service)
 
@@ -37,6 +38,7 @@ async def test_service_descriptions_load(hass, setup_integration) -> None:
         "clear_passcodes",
         "get_auto_lock",
         "set_auto_lock",
+        "get_access_inventory",
     }
 
 
@@ -226,3 +228,95 @@ async def test_unloaded_device_is_rejected(hass, setup_integration) -> None:
             {"device_id": device_id},
             blocking=True,
         )
+
+
+async def test_access_inventory_pin_response_is_credential_free(
+    hass, setup_integration, mock_ttlock_connection
+) -> None:
+    mock_ttlock_connection.async_get_access_inventory.return_value = InventoryResult(
+        (InventoryEntry("permanent"), InventoryEntry("time_window")),
+        complete=True,
+        limitation="active batch PINs can be omitted",
+    )
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_access_inventory",
+        {"device_id": _device_id(hass), "method": "keypad_pin"},
+        blocking=True,
+        return_response=True,
+    )
+    assert response == {
+        "method": "keypad_pin",
+        "read_status": "partial",
+        "count": 2,
+        "validity_counts": {"permanent": 1, "time_window": 1},
+        "enumeration_complete": True,
+        "skipped_unknown_layouts": 0,
+        "limitation": "active batch PINs can be omitted",
+        "credential_names": "unavailable",
+        "create_capability": "supported",
+        "modify_capability": "unsupported",
+        "delete_capability": "supported",
+    }
+    mock_ttlock_connection.async_get_access_inventory.assert_awaited_once_with(
+        "keypad_pin"
+    )
+
+
+async def test_access_inventory_unverified_admin_skips_ble(
+    hass, setup_integration, mock_ttlock_connection
+) -> None:
+    mock_ttlock_connection.inventory_admin_available = False
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_access_inventory",
+        {"device_id": _device_id(hass), "method": "fingerprint"},
+        blocking=True,
+        return_response=True,
+    )
+    assert response == {
+        "method": "fingerprint",
+        "read_status": "unverified",
+        "reason": "admin_key_required",
+    }
+    mock_ttlock_connection.async_get_access_inventory.assert_not_awaited()
+
+
+async def test_access_inventory_failure_is_unverified_without_sensitive_error(
+    hass, setup_integration, mock_ttlock_connection
+) -> None:
+    mock_ttlock_connection.async_get_access_inventory.side_effect = TTLockError(
+        "synthetic-sensitive-token"
+    )
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_access_inventory",
+        {"device_id": _device_id(hass), "method": "ic_card"},
+        blocking=True,
+        return_response=True,
+    )
+    assert response == {
+        "method": "ic_card",
+        "read_status": "unverified",
+        "reason": "read_failed",
+    }
+
+
+async def test_access_inventory_partial_card_discovery(
+    hass, setup_integration, mock_ttlock_connection
+) -> None:
+    mock_ttlock_connection.async_get_access_inventory.return_value = InventoryResult(
+        (InventoryEntry("permanent"),),
+        complete=False,
+        limitation="eight-byte IC-card layout unverified",
+    )
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_access_inventory",
+        {"device_id": _device_id(hass), "method": "ic_card"},
+        blocking=True,
+        return_response=True,
+    )
+    assert response["read_status"] == "partial"
+    assert response["count"] == 1
+    assert response["enumeration_complete"] is False

@@ -37,7 +37,13 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from ttlock_ble import KeyboardPwdType, LockState, TTLockClient, TTLockError
+from ttlock_ble import (
+    InventoryResult,
+    KeyboardPwdType,
+    LockState,
+    TTLockClient,
+    TTLockError,
+)
 
 from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
@@ -347,6 +353,32 @@ class TtlockBleConnection:
             "clear passcodes",
             lambda client: client.clear_passcodes(),
             active_scan=False,
+        )
+
+    @property
+    def inventory_admin_available(self) -> bool:
+        """Do not open a BLE session when this key lacks an admin password."""
+        return bool(self._key.adminPs) and self._key.adminPs.isdecimal()
+
+    async def async_get_access_inventory(self, method: str) -> InventoryResult:
+        """Explicit, bounded, read-only inventory via the existing HA-owned route."""
+        if not self.inventory_admin_available:
+            msg = "Credential inventory requires an admin key"
+            raise TTLockError(msg)
+
+        async def read(client: TTLockClient) -> InventoryResult:
+            async with asyncio.timeout(90):
+                if method == "keypad_pin":
+                    return await client.get_passcodes()
+                if method == "fingerprint":
+                    return await client.get_fingerprints()
+                if method == "ic_card":
+                    return await client.get_cards()
+                msg = "Unknown inventory method"
+                raise ValueError(msg)
+
+        return await self._async_run_management_command(
+            f"read {method} inventory", read, active_scan=True
         )
 
     async def async_get_operation_log(self) -> list[LogEntry]:

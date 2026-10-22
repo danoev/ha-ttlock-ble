@@ -204,6 +204,55 @@ async def test_key_exposed(hass, sample_virtual_key) -> None:
     assert conn.key is sample_virtual_key
 
 
+async def test_inventory_requires_admin_before_any_acquisition(
+    hass, sample_virtual_key
+) -> None:
+    sample_virtual_key.adminPs = ""
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    conn._async_run_management_command = AsyncMock()
+    assert not conn.inventory_admin_available
+    with pytest.raises(TTLockError, match="admin key"):
+        await conn.async_get_access_inventory("fingerprint")
+    conn._async_run_management_command.assert_not_awaited()
+
+
+async def test_inventory_uses_one_explicit_managed_operation(
+    hass, sample_virtual_key
+) -> None:
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    result = MagicMock(name="InventoryResult")
+    client = MagicMock()
+    client.get_cards = AsyncMock(return_value=result)
+    client.get_fingerprints = AsyncMock()
+    client.get_passcodes = AsyncMock()
+
+    async def execute(_action, operation, *, active_scan):
+        assert active_scan
+        return await operation(client)
+
+    conn._async_run_management_command = AsyncMock(side_effect=execute)
+    assert await conn.async_get_access_inventory("ic_card") is result
+    client.get_cards.assert_awaited_once()
+    client.get_fingerprints.assert_not_awaited()
+    client.get_passcodes.assert_not_awaited()
+
+
+async def test_inventory_cancellation_is_not_reported_as_a_result(
+    hass, sample_virtual_key
+) -> None:
+    conn = TtlockBleConnection(hass, sample_virtual_key)
+    client = MagicMock()
+    client.get_fingerprints = AsyncMock(side_effect=asyncio.CancelledError)
+
+    async def execute(_action, operation, *, active_scan):
+        assert active_scan
+        return await operation(client)
+
+    conn._async_run_management_command = AsyncMock(side_effect=execute)
+    with pytest.raises(asyncio.CancelledError):
+        await conn.async_get_access_inventory("fingerprint")
+
+
 async def test_query_state_returns_none_when_device_missing(
     hass,
     sample_virtual_key,
