@@ -1,28 +1,34 @@
 [project]
 name = "ha-ttlock-ble"
-version = "3.5.1rc16"
+version = "3.5.1"
 description = "Home Assistant integration for DLock-XP / TTLock smart locks (BLE)"
 requires-python = ">=3.14.2"
 
 [tool.uv]
 package = false
+# HA's current cryptography and ESPHome requirements conflict on Intel macOS.
+# These are development-lock targets; HACS runtime installation is unchanged.
+environments = [
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 [dependency-groups]
 dev = [
-    "aioesphomeapi==45.6.1",
+    "aioesphomeapi==46.6.0",
     "aiousbwatcher==1.1.2",
     "bleak==3.0.2",
     "bluetooth-adapters==2.4.0",
     "colorlog==6.12.0",
     "dbus-fast==5.0.22",
-    "habluetooth==6.26.5",
-    "homeassistant==2026.8.0",
+    "habluetooth==7.1.2",
+    "homeassistant==2026.10.2",
     "pre-commit==4.6.1",
     "pytest==9.0.3",
     "pytest-asyncio==1.4.0",
     "pytest-cov==7.1.0",
-    "pytest-homeassistant-custom-component==0.13.354",
-    "serialx==1.8.2",
+    "pytest-homeassistant-custom-component==0.13.373",
+    "serialx==1.11.0",
     "ttlock-ble @ https://github.com/danoev/ttlock-ble/archive/73e6c89544dd178cb09de9b88f29f5cf204b2429.tar.gz",
 ]
 lint = [

@@ -12,12 +12,11 @@ from ttlock_ble import commands as cmd
 
 from custom_components.ttlock_ble.const import DOMAIN
 from custom_components.ttlock_ble.services import async_setup_services
+from tests.device_lookup import device_by_identifier
 
 
 def _device_id(hass) -> str:
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, "aa:bb:cc:dd:ee:ff")}
-    )
+    device = device_by_identifier(dr.async_get(hass), (DOMAIN, "aa:bb:cc:dd:ee:ff"))
     assert device is not None
     return device.id
 

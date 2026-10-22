@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import voluptuous as vol
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.helpers import selector
@@ -18,6 +17,7 @@ from .const import (
     MIN_RECONNECT_INTERVAL_SECONDS,
     MIN_SCAN_INTERVAL_SECONDS,
 )
+from .validation import vol
 
 if TYPE_CHECKING:
     from .data import TtlockBleOptionsData

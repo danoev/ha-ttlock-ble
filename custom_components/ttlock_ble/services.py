@@ -6,7 +6,6 @@ from dataclasses import asdict
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
-import voluptuous as vol
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
@@ -19,6 +18,7 @@ from ttlock_ble import InventoryError, InventoryReason, InventoryResult, Keyboar
 
 from .access import AccessFailure, AccessInventoryError
 from .const import DOMAIN
+from .validation import vol
 
 if TYPE_CHECKING:
     from datetime import datetime

@@ -22,12 +22,11 @@ from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING, cast
 
+from homeassistant.components import bluetooth as ha_bluetooth
 from homeassistant.components.bluetooth import (
     MONOTONIC_TIME,
     BluetoothCallbackMatcher,
-    BluetoothReachabilityIntent,
     BluetoothScanningMode,
-    async_address_reachability_diagnostics,
     async_ble_device_from_address,
     async_clear_advertisement_history,
     async_get_learned_advertising_interval,
@@ -51,6 +50,13 @@ from .access import AccessFailure, AccessInventoryError
 from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
 from .log_history import TtlockBleLogHistory
+
+# These public diagnostic helpers were introduced after the declared HA floor.
+# Their absence must never prevent setup or change acquisition/control behavior.
+BluetoothReachabilityIntent = getattr(ha_bluetooth, "BluetoothReachabilityIntent", None)
+async_address_reachability_diagnostics = getattr(
+    ha_bluetooth, "async_address_reachability_diagnostics", None
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -1396,6 +1402,11 @@ class TtlockBleConnection:
         started: float,
     ) -> None:
         """Record HA's credential-safe explanation for a final route failure."""
+        if (
+            BluetoothReachabilityIntent is None
+            or async_address_reachability_diagnostics is None
+        ):
+            return
         try:
             diagnostic = async_address_reachability_diagnostics(
                 self._hass,

@@ -1,5 +1,5 @@
 {
-    "name": "TTLock BLE",
+    "name": "TTLock BLE (danoev)",
     "zip_release": true,
     "filename": "ttlock_ble.zip",
     "homeassistant": "2026.5.1",

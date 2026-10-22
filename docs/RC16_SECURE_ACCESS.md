@@ -1,5 +1,10 @@
 # RC16 administrator access foundation (unpublished)
 
+> Historical RC16 design. RC16 is now published; the maintained
+> [stable 3.5.1 contract](STABLE_3.5.1.md) supersedes missing-PIN retirement and
+> failed-read table clearing. Limited PIN omissions preserve scoped references
+> and labels, with explicit uncertainty; no inventory absence proves deletion.
+
 RC16 starts at the immutable RC15 integration `00b8d42c46a64486b0c1aaa9d0cf02f3139ae181`
 and SDK `fda4233d3fb15ed256f5aa66ebd0f971587e4e9e`. No release, main or earlier
 PR is replaced. This is a development candidate, not authorization to operate

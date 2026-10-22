@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
@@ -24,6 +23,7 @@ from .exceptions import (
 )
 from .manual_key import TtlockBleManualKey
 from .options_flow import TtlockBleOptionsFlow
+from .validation import vol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

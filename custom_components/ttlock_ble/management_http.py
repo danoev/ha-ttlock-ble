@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import voluptuous as vol
 import yarl
 from aiohttp import web
 from homeassistant.auth.models import TOKEN_TYPE_NORMAL
@@ -19,6 +18,7 @@ from homeassistant.config_entries import ConfigEntryState
 from .access import access_capabilities
 from .const import DOMAIN
 from .services import _inventory_response
+from .validation import vol
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .data import TtlockBleConfigEntry
 
 URL = "/api/ttlock_ble/administration"
-STATIC_URL = "/ttlock-ble-admin/rc16.js"
+STATIC_URL = "/ttlock-ble-admin/3.5.1.js"
 _BODY_LIMIT = 4096
 _ID = vol.All(str, vol.Length(min=1, max=128))
 _BASE = {

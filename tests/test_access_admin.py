@@ -6,12 +6,12 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import voluptuous as vol
 from homeassistant.exceptions import Unauthorized
 
 from custom_components.ttlock_ble.credential_references import (
     ProtectedCredentialReferences,
 )
+from custom_components.ttlock_ble.validation import vol
 from tests.test_services import _device_id
 
 
