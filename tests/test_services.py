@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.service import async_get_all_descriptions
 from ttlock_ble import InventoryEntry, InventoryResult, KeyboardPwdType, TTLockError
+from ttlock_ble import commands as cmd
 
 from custom_components.ttlock_ble.const import DOMAIN
 from custom_components.ttlock_ble.services import async_setup_services
@@ -251,6 +255,7 @@ async def test_access_inventory_pin_response_is_credential_free(
         "count": 2,
         "validity_counts": {"permanent": 1, "time_window": 1},
         "enumeration_complete": True,
+        "transport_interrupted": False,
         "skipped_unknown_layouts": 0,
         "limitation": "active batch PINs can be omitted",
         "credential_names": "unavailable",
@@ -320,3 +325,105 @@ async def test_access_inventory_partial_card_discovery(
     assert response["read_status"] == "partial"
     assert response["count"] == 1
     assert response["enumeration_complete"] is False
+
+
+async def test_access_inventory_transport_interruption_is_explicit(
+    hass, setup_integration, mock_ttlock_connection
+) -> None:
+    mock_ttlock_connection.async_get_access_inventory.return_value = InventoryResult(
+        (InventoryEntry("permanent"),),
+        complete=False,
+        limitation="inventory read interrupted",
+        transport_interrupted=True,
+    )
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_access_inventory",
+        {"device_id": _device_id(hass), "method": "ic_card"},
+        blocking=True,
+        return_response=True,
+    )
+    assert response["transport_interrupted"] is True
+    assert response["read_status"] == "partial"
+    assert response["enumeration_complete"] is False
+    assert response["count"] == 1
+
+
+@pytest.mark.parametrize("method", ["keypad_pin", "fingerprint", "ic_card"])
+async def test_wire_credentials_never_reach_public_inventory_response_or_states(
+    hass, setup_integration, mock_ttlock_connection, method
+) -> None:
+    pin = b"8675309"
+    identifier = bytes.fromhex("deadbeef")
+    sentinel = bytes([99, 1, 1, 0, 0])
+    if method == "keypad_pin":
+        wire = bytes([7, 1, 0, 0, 0, 0, 0, 1, len(pin)]) + pin + b"\x00" + bytes(5)
+        item, _, _ = cmd.parse_passcode_list_response(wire)
+    elif method == "fingerprint":
+        wire = (
+            bytes([6, 1, 100, 6, 0, 1])
+            + identifier
+            + bytes([0, 3])
+            + bytes(5)
+            + sentinel
+        )
+        item = cmd.parse_fingerprint_list_response(wire)
+    else:
+        wire = bytes([5, 1, 85, 1, 0, 1]) + identifier + bytes(5) + sentinel
+        item = cmd.parse_card_list_response(wire)
+    assert item is not None
+    mock_ttlock_connection.async_get_access_inventory.return_value = InventoryResult(
+        (item,), complete=True, limitation="coverage remains limited"
+    )
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_access_inventory",
+        {"device_id": _device_id(hass), "method": method},
+        blocking=True,
+        return_response=True,
+    )
+    serialized = json.dumps(response) + repr(
+        [state.as_dict() for state in hass.states.async_all()]
+    )
+    assert pin.decode() not in serialized
+    assert identifier.hex() not in serialized
+    assert str(int.from_bytes(identifier, "big")) not in serialized
+    assert not {"pin", "fingerprint_id", "card_uid", "slot"}.intersection(response)
+
+
+async def test_inventory_service_cancellation_propagates(
+    hass, setup_integration, mock_ttlock_connection
+) -> None:
+    mock_ttlock_connection.async_get_access_inventory.side_effect = (
+        asyncio.CancelledError
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await hass.services.async_call(
+            DOMAIN,
+            "get_access_inventory",
+            {"device_id": _device_id(hass), "method": "ic_card"},
+            blocking=True,
+            return_response=True,
+        )
+
+
+async def test_existing_pin_action_exposes_input_to_ha_service_event(
+    hass, setup_integration
+) -> None:
+    """HA emits service input before the handler; Recorder/traces need user policy."""
+    from homeassistant.const import EVENT_CALL_SERVICE
+
+    calls = []
+    remove = hass.bus.async_listen(EVENT_CALL_SERVICE, calls.append)
+    try:
+        await hass.services.async_call(
+            DOMAIN,
+            "add_passcode",
+            {"device_id": _device_id(hass), "code": "8675309", "type": "permanent"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+    finally:
+        remove()
+    event = next(event for event in calls if event.data["domain"] == DOMAIN)
+    assert event.data["service_data"]["code"] == "8675309"

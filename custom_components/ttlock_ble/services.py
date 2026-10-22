@@ -209,11 +209,15 @@ def _inventory_response(method: str, result: InventoryResult) -> ServiceResponse
         {
             "method": method,
             "read_status": "partial"
-            if method == "keypad_pin" or not result.complete or result.skipped_unknown
+            if method == "keypad_pin"
+            or not result.complete
+            or result.skipped_unknown
+            or result.transport_interrupted
             else "supported",
             "count": len(result.entries),
             "validity_counts": validity_counts,
             "enumeration_complete": result.complete,
+            "transport_interrupted": result.transport_interrupted,
             "skipped_unknown_layouts": result.skipped_unknown,
             "limitation": result.limitation,
             "credential_names": "unavailable",

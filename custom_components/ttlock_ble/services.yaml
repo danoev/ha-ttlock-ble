@@ -108,7 +108,8 @@ get_access_inventory:
   description: >-
     Read only credential-free counts for one access method over Bluetooth.
     PIN coverage is incomplete, and card/fingerprint cyclic restrictions are
-    not visible. This does not enumerate every credential or change access.
+    not visible. Runs only when the lock is idle; Lock/Unlock takes priority.
+    This does not enumerate every credential or change access.
   fields:
     device_id:
       name: Device

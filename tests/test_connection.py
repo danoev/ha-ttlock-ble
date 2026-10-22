@@ -27,6 +27,7 @@ from custom_components.ttlock_ble.connection import (
     EXPLICIT_CONNECT_SCAN_TIMEOUT_SECONDS,
     EXPLICIT_CONTROL_ACQUISITION_TIMEOUT_SECONDS,
     FRESH_CONNECT_TIMEOUT_SECONDS,
+    INVENTORY_ACQUISITION_TIMEOUT_SECONDS,
     MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS,
     ROBUST_CONNECT_ATTEMPTS,
     ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS,
@@ -165,6 +166,10 @@ def test_connection_signal_lowercases_mac() -> None:
             MANAGEMENT_ACQUISITION_TIMEOUT_SECONDS,
         ),
         (
+            _AcquisitionIntent.INVENTORY,
+            INVENTORY_ACQUISITION_TIMEOUT_SECONDS,
+        ),
+        (
             _AcquisitionIntent.ROUTINE_QUERY,
             ROUTINE_QUERY_ACQUISITION_TIMEOUT_SECONDS,
         ),
@@ -209,48 +214,36 @@ async def test_inventory_requires_admin_before_any_acquisition(
 ) -> None:
     sample_virtual_key.adminPs = ""
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    conn._async_run_management_command = AsyncMock()
+    conn._async_read_access_inventory = AsyncMock()
     assert not conn.inventory_admin_available
     with pytest.raises(TTLockError, match="admin key"):
         await conn.async_get_access_inventory("fingerprint")
-    conn._async_run_management_command.assert_not_awaited()
+    conn._async_read_access_inventory.assert_not_awaited()
 
 
 async def test_inventory_uses_one_explicit_managed_operation(
-    hass, sample_virtual_key
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
 ) -> None:
     conn = TtlockBleConnection(hass, sample_virtual_key)
     result = MagicMock(name="InventoryResult")
-    client = MagicMock()
-    client.get_cards = AsyncMock(return_value=result)
-    client.get_fingerprints = AsyncMock()
-    client.get_passcodes = AsyncMock()
-
-    async def execute(_action, operation, *, active_scan):
-        assert active_scan
-        return await operation(client)
-
-    conn._async_run_management_command = AsyncMock(side_effect=execute)
+    mock_ttlock_client.get_cards = AsyncMock(return_value=result)
+    mock_ttlock_client.get_fingerprints = AsyncMock()
+    mock_ttlock_client.get_passcodes = AsyncMock()
     assert await conn.async_get_access_inventory("ic_card") is result
-    client.get_cards.assert_awaited_once()
-    client.get_fingerprints.assert_not_awaited()
-    client.get_passcodes.assert_not_awaited()
+    mock_ttlock_client.get_cards.assert_awaited_once()
+    mock_ttlock_client.get_fingerprints.assert_not_awaited()
+    mock_ttlock_client.get_passcodes.assert_not_awaited()
+    mock_ttlock_client.disconnect.assert_awaited_once()
 
 
 async def test_inventory_cancellation_is_not_reported_as_a_result(
-    hass, sample_virtual_key
+    hass, sample_virtual_key, mock_ble_resolver, mock_ttlock_client
 ) -> None:
     conn = TtlockBleConnection(hass, sample_virtual_key)
-    client = MagicMock()
-    client.get_fingerprints = AsyncMock(side_effect=asyncio.CancelledError)
-
-    async def execute(_action, operation, *, active_scan):
-        assert active_scan
-        return await operation(client)
-
-    conn._async_run_management_command = AsyncMock(side_effect=execute)
+    mock_ttlock_client.get_fingerprints = AsyncMock(side_effect=asyncio.CancelledError)
     with pytest.raises(asyncio.CancelledError):
         await conn.async_get_access_inventory("fingerprint")
+    mock_ttlock_client.disconnect.assert_awaited_once()
 
 
 async def test_query_state_returns_none_when_device_missing(
