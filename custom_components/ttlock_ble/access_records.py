@@ -149,7 +149,7 @@ class AccessRecordStore:
         scope = self._scope(lock, method)
         if revision is None:
             revision = self.mark_stale(lock, method)
-        if revision != self._revision.get(scope):
+        if not self._loaded or revision != self._revision.get(scope):
             return
         if not cleaned or not inventory.records_complete:
             return
@@ -265,6 +265,9 @@ class AccessRecordStore:
     async def async_remove(self) -> None:
         """Config-entry deletion forgets aliases and private key, without BLE I/O."""
         async with self._lock:
+            self._revision = {
+                scope: revision + 1 for scope, revision in self._revision.items()
+            }
             self._fresh.clear()
             self._confirmed.clear()
             self._scopes.clear()

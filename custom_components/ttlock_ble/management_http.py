@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
+import yarl
 from aiohttp import web
 from homeassistant.auth.models import TOKEN_TYPE_NORMAL
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
@@ -69,6 +70,20 @@ def _response(data: dict[str, Any], status: int = 200) -> web.Response:
     )
 
 
+def _same_origin(request: web.Request) -> bool:
+    """Compare HA-normalized authority, including equivalent default ports."""
+    try:
+        origin = yarl.URL(request.headers.get("Origin", ""))
+        expected = request.url
+        return origin == origin.origin() and (
+            origin.scheme,
+            origin.raw_host,
+            origin.port,
+        ) == (expected.scheme, expected.raw_host, expected.port)
+    except ValueError:
+        return False
+
+
 class AdministrationView(HomeAssistantView):
     """Normal active admin session required on every request, never opaque-ref auth."""
 
@@ -95,7 +110,7 @@ class AdministrationView(HomeAssistantView):
             and token.token_type == TOKEN_TYPE_NORMAL
             and request.headers.get("Authorization", "").startswith("Bearer ")
             and not request.query
-            and request.headers.get("Origin") == f"{request.scheme}://{request.host}"
+            and _same_origin(request)
             and request.headers.get("X-TTLock-Admin") == "1"
             and request.headers.get("Sec-Fetch-Site", "same-origin") == "same-origin"
         )

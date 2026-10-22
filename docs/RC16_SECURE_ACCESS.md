@@ -179,3 +179,55 @@ in reference implementations lack sufficient hardware evidence for support.
 A future verified-entry policy also needs trustworthy fresh event attribution,
 identity verification and independent safeguards. Unlock alone never disarms
 Alarmo. RC16 adds none of these automation permissions.
+
+## Final publication-gate corrections and reverse-proxy contract
+
+Focused validation reproduced two defects in the initial RC16 candidate:
+
+- Comparing Origin as text rejected equivalent HTTPS authorities when a trusted
+  proxy supplied `host:443` and the browser omitted the default port. Origin now
+  compares parsed scheme, canonical hostname and effective port against HA's
+  normalized request URL. It still rejects different schemes/hosts/ports,
+  path-bearing/opaque origins and malformed values. It never trusts forwarded
+  headers independently of Home Assistant.
+- A pre-removal empty inventory could mark a removed private store fresh because
+  it did not need to derive an HMAC from the removed key. Removed stores now
+  invalidate outstanding revision tickets and unloaded stores refuse reconciliation,
+  including after a new load of the same store object.
+
+The regression suite uses actual HA2026.8 HTTP forwarding and bearer middleware,
+including direct local requests, preserved Host, X-Forwarded-Host, multiple trusted
+proxy hops, HTTPS default/nondefault ports, untrusted/disabled forwarding,
+non-admin/invalid/expired/long-lived sessions and secret-field rejection.
+Expiry follows Home Assistant's own token-validation leeway; tests use tokens
+expired beyond that leeway. No authorization shortcut was added.
+
+For an HTTPS reverse proxy, configure HA's supported Trust X-Forwarded-For and
+Trusted proxies settings for the immediate trusted proxy. The proxy must forward
+X-Forwarded-For and X-Forwarded-Proto and preserve the external Host or supply its
+external authority in X-Forwarded-Host. Include nondefault ports. Without
+X-Forwarded-For, HA does not process forwarded proto/host; the administration view
+then fails closed on an HTTPS Origin versus HTTP backend mismatch. Do not relax
+Origin checks or add arbitrary origins to work around a proxy misconfiguration.
+The middleware, rather than this integration, rejects untrusted forwarding peers.
+Do not cache `/api/` or `/auth/` or capture confidential request bodies in a proxy.
+See [official HTTP reverse-proxy documentation](https://www.home-assistant.io/integrations/http/#reverse-proxies).
+
+The browser gate used the actual frontend20260729.5 helper and supported adapter
+from immutable source
+[`7ac98b7`](https://github.com/home-assistant/frontend/blob/7ac98b7fdde12cd9ee1e15a75d3a5bd362febf4c/src/state/connection-mixin.ts),
+with native fetch, a synthetic TLS proxy and real HA authentication/view/private
+storage. It exercised initial load, inventory read, naming, persistent opt-out,
+disabled write controls and rejection of a write/secret request. BLE results and
+all authentication fixtures were synthetic. This validates the panel's transport
+contract, not an installed production HA sidebar shell or hardware compatibility;
+those remain controlled HACS/UI validation steps after publication approval.
+
+**Legacy permission boundary remains distinct.** The administrator-only HTTP
+panel does not add administrator enforcement to the existing PIN service handlers.
+Callers already permitted to invoke those services retain their old behaviour
+unless the per-lock opt-out is enabled. Tests exercise a non-admin service context,
+then enable the opt-out through the authenticated panel API, reload private
+metadata and prove add/delete/clear all refuse before a BLE operation. Home
+Assistant can emit supplied service data before this refusal. No confidential
+PIN-entry replacement or retroactive trace/Recorder protection is claimed.
