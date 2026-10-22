@@ -21,7 +21,13 @@ firmware has not yet been tested against these queries.
 
 All new list commands require a fresh admin challenge on the existing
 connection. They use the RC12 HA-owned Bluetooth acquisition and cleanup path,
-with a bounded on-demand operation. A pagination error, transport interruption
+with a 16-second acquisition budget inside a 30-second total inventory deadline.
+Inventory never queues behind an active operation, and explicit Lock/Unlock
+preempts both acquisition and reading. Mandatory owned cleanup completes before
+control may proceed; no replacement client is allowed while cleanup is uncertain.
+Every inventory read tears down its session, even after success. A transport
+failure retains partial metadata with `transport_interrupted: true`; a service
+cancellation propagates without inventing a result. A pagination error, transport interruption
 or unknown layout produces a partial result when safe metadata was already
 observed. No inventory query runs in background polling. A failed list must not
 be interpreted as an empty lock.

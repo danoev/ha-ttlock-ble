@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.5.1rc13 (unpublished access-inventory candidate)
+
+- Add on-demand credential-free PIN, fingerprint and four-byte IC-card summaries.
+- Mark incomplete coverage and transport interruption explicitly.
+- Let explicit Lock/Unlock preempt inventory acquisition and reading; cap the
+  combined read operation at 30 seconds with a 16-second acquisition budget.
+- Always tear down the inventory session and retain uncertain cleanup ownership.
+- Suppress raw inventory transport exception chains, including admin challenges.
+- Add a last-authoritative-state timestamp for stale-state diagnostics.
+- Document HA service-event, Recorder and automation-trace exposure of existing
+  PIN write inputs; keep new credential writes and Alarmo auto-disarm disabled.
+
 ## 3.5.1rc12 (local corrective candidate)
 
 - Order authoritative state observations per lock before multi-lock aggregation.
@@ -12,8 +24,8 @@
 ## 3.5.1 hardware-validation development series
 
 This fork-only prerelease series preserves every published tag. **RC1 through
-RC11 remain historical checkpoints; RC12 is the current corrective candidate.
-Hardware testing awaits its actual GitHub/HACS prerelease.** They remain available solely as
+RC11 remain historical checkpoints; RC12 is the published corrective baseline
+and RC13 is the unpublished inventory candidate.** They remain available solely as
 reproducible development artefacts and their tag history has not been rewritten.
 
 - **RC1** established the isolated hardware-validation branch and prerelease
