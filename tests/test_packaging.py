@@ -11,7 +11,9 @@ from urllib.parse import urlparse
 from zipfile import ZipFile
 
 import pytest
+from awesomeversion import AwesomeVersion
 from packaging.requirements import Requirement
+from packaging.version import Version
 
 from scripts.validate_release import validate_release
 
@@ -116,6 +118,25 @@ def test_hacs_zip_metadata_matches_fork_owned_release_workflow() -> None:
     assert f'gh release upload "$TAG" "$RUNNER_TEMP/{_HACS_ARCHIVE}"' in workflow
     assert "roquerodrigo" not in workflow
     assert "secrets." not in workflow
+
+
+def test_stable_identity_version_and_hacs_floor_remain_compatible() -> None:
+    hacs = json.loads((_ROOT / "hacs.json").read_text())
+    assert hacs == {
+        "name": "TTLock BLE (danoev)",
+        "zip_release": True,
+        "filename": "ttlock_ble.zip",
+        "homeassistant": "2026.5.1",
+        "hacs": "2.0.5",
+    }
+    manifest = json.loads(
+        (_ROOT / "custom_components/ttlock_ble/manifest.json").read_text()
+    )
+    assert manifest["domain"] == "ttlock_ble"
+    assert manifest["name"] == "TTLock BLE"
+    assert Version(manifest["version"]) > Version("3.5.1rc16")
+    assert AwesomeVersion(manifest["version"]) > AwesomeVersion("3.5.1rc16")
+    assert validate_release(_ROOT, "v3.5.1") == "3.5.1"
 
 
 def test_hacs_install_zip_contains_only_integration_files_at_root() -> None:
