@@ -7,7 +7,7 @@ these lineage-specific development PRs into current SDK main implicitly.
 
 Metadata is `3.5.1rc16` in manifest, project, lockfile and release manifest.
 The manifest/project/lockfile pin SDK
-`81c687f76a498cd97ed6287199bedb57f9d9b2fc`, immutable archive SHA-256
+`73e6c89544dd178cb09de9b88f29f5cf204b2429`, immutable archive SHA-256
 `64022bf63929045d7b66bd5262573240d3de5096506aa812701058d14ed8c62c`.
 The dependency remains the preserved0.1.11 transport lineage.
 
