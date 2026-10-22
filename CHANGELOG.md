@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.5.2 (unreleased candidate)
+
+- Bound and deduplicate delayed connected state verification after an observed
+  unlock; cancel follow-up work on confirmation, newer control and unload.
+- Reuse successful read-only inventory sessions for an optional bolt query within
+  the existing budget, without invalidating inventory when that query fails.
+- Expose failed, pending and stale verification separately from retained known
+  bolt state and Last Verified State; never infer Locked from activity or timers.
+- Preserve control priority, single-send, owned cleanup and the immutable SDK pin.
+  See [policy and supervised validation](docs/STATE_RECONCILIATION_3.5.2.md).
+
 ## 3.5.1 (2026-10-22)
 
 First stable independently maintained **TTLock BLE (danoev)** distribution,

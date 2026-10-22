@@ -69,6 +69,11 @@ class TtlockBleLastVerifiedStateSensor(TtlockBleEntity, SensorEntity):
         elapsed = max(0.0, monotonic() - attribution.observed_at)
         return dt_util.utcnow() - timedelta(seconds=elapsed)
 
+    @property
+    def extra_state_attributes(self) -> dict[str, str | bool | None]:
+        """Preserve timestamp/source while exposing failed or pending confirmation."""
+        return self.coordinator.state_freshness(self._key.lockMac)
+
 
 class TtlockBleBatterySensor(TtlockBleEntity, SensorEntity):
     """Battery level reported by the lock — refreshed on poll and on every push."""

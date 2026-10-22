@@ -99,6 +99,11 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
         """Return a stable unique id for this entity."""
         return f"{self._key.lockMac}_lock"
 
+    @property
+    def extra_state_attributes(self) -> dict[str, str | bool | None]:
+        """Keep cached bolt state distinct from an outstanding confirmation."""
+        return self.coordinator.state_freshness(self._key.lockMac)
+
     async def async_added_to_hass(self) -> None:
         """Subscribe to push-event notifications for the lock's MAC."""
         await super().async_added_to_hass()
@@ -134,6 +139,8 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
             event.lock_state,
         )
         if event.lock_state is not None:
+            if event.lock_state == LockState.UNLOCKED and event.status == 1:
+                self.coordinator.async_note_unlock_hint(self._key.lockMac)
             LOGGER.debug(
                 "Push state hint for %s (source=push, hint=%s); "
                 "requesting authoritative query",
@@ -335,6 +342,7 @@ class TtlockBleLock(TtlockBleEntity, LockEntity):
         """Force-query state and apply it to `_attr_is_locked` if known."""
         result = await self._connection.async_query_state()
         if result is None:
+            self.coordinator.async_note_query_failed(self._key.lockMac)
             LOGGER.debug(
                 "Forced query for %s returned no state",
                 self._key.lockMac,
