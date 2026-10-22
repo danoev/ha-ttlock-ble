@@ -1,6 +1,19 @@
 # Changelog
 
-## 3.5.1rc15 (unpublished pagination candidate)
+## 3.5.1rc16 (unpublished administration candidate)
+
+- Add a local admin-only HTTP/sidebar panel for private individual references,
+  explicit labels, freshness/presence lifecycle and local reset; no secret entry.
+- Keep public inventories credential-free; require complete reads and confirmed
+  cleanup for fresh references. Preserve preemption and all RC12 ownership rules.
+- Add explicit per-lock legacy PIN-service opt-out and honest privacy warnings;
+  service-event/Recorder/trace exposure cannot be fixed inside a handler.
+- Record the supplied positive S31 PIN traversal evidence (1 PIN, 4,340ms), plus
+  fingerprint2/card2 corroboration. PIN offline/batch coverage remains partial.
+- Pin the exact RC16 SDK: private in-memory records and offline write candidates
+  only. New credential writes and Alarmo auto-disarming remain disabled.
+
+## 3.5.1rc15 (published prerelease)
 
 - Recognise the exact four-byte CMD 07 / SUCCESS terminal demonstrated by
   upstream's enveloped hardware fixture, instead of accepting arbitrary short replies.

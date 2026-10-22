@@ -38,6 +38,7 @@ from homeassistant.components.bluetooth import (
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from ttlock_ble import (
+    AdministrativeInventory,
     InventoryError,
     InventoryResult,
     KeyboardPwdType,
@@ -187,7 +188,9 @@ class TtlockBleConnection:
         self._next_client_generation = 0
         self._owned_client_generation: int | None = None
         self._lock = asyncio.Lock()
-        self._inventory_task: asyncio.Task[InventoryResult] | None = None
+        self._inventory_task: (
+            asyncio.Task[InventoryResult | AdministrativeInventory] | None
+        ) = None
         self._control_requests = 0
         self._inventory_diagnostics: dict[str, str | int | bool | None] = {}
         self._acquisition_failure = AccessFailure.NO_CANDIDATE
@@ -381,6 +384,22 @@ class TtlockBleConnection:
 
     async def async_get_access_inventory(self, method: str) -> InventoryResult:
         """Start one low-priority read, preemptible by explicit bolt control."""
+        return cast(
+            "InventoryResult", await self._async_start_inventory(method, private=False)
+        )
+
+    async def async_get_administrative_inventory(
+        self, method: str
+    ) -> AdministrativeInventory:
+        """Private records share the public read's cancellation/cleanup policy."""
+        return cast(
+            "AdministrativeInventory",
+            await self._async_start_inventory(method, private=True),
+        )
+
+    async def _async_start_inventory(
+        self, method: str, *, private: bool
+    ) -> InventoryResult | AdministrativeInventory:
         if not self.inventory_admin_available:
             msg = "Credential inventory requires an admin key"
             raise TTLockError(msg)
@@ -390,7 +409,7 @@ class TtlockBleConnection:
         if self._inventory_task is not None and not self._inventory_task.done():
             raise AccessInventoryError(AccessFailure.BUSY, "queue")
         task = self._hass.async_create_task(
-            self._async_read_access_inventory(method),
+            self._async_read_access_inventory(method, private=private),
             name=f"{DOMAIN}.inventory.{self._key.lockMac}",
         )
         self._inventory_task = task
@@ -400,7 +419,9 @@ class TtlockBleConnection:
             if self._inventory_task is task and task.done():
                 self._inventory_task = None
 
-    async def _async_read_access_inventory(self, method: str) -> InventoryResult:
+    async def _async_read_access_inventory(
+        self, method: str, *, private: bool = False
+    ) -> InventoryResult | AdministrativeInventory:
         """Never queue behind control, and close even a partially successful read."""
         if self._control_requests or self._lock.locked() or self._closing:
             raise AccessInventoryError(AccessFailure.BUSY, "queue")
@@ -424,14 +445,16 @@ class TtlockBleConnection:
                         }.get(self._acquisition_failure, "discovery")
                         raise AccessInventoryError(self._acquisition_failure, stage)  # noqa: TRY301
                     self._inventory_diagnostics["stage"] = "inventory"
-                    if method == "keypad_pin":
-                        result = await client.get_passcodes()
-                    elif method == "fingerprint":
-                        result = await client.get_fingerprints()
-                    else:
-                        result = await client.get_cards()
+                    result = await self._async_inventory_result(
+                        client, method, private=private
+                    )
+                    summary = (
+                        result.summary
+                        if isinstance(result, AdministrativeInventory)
+                        else result
+                    )
                     self._inventory_diagnostics.update(
-                        reason=result.reason.value, stage="inventory"
+                        reason=summary.reason.value, stage="inventory"
                     )
                     return result
             except (AccessInventoryError, InventoryError) as error:
@@ -481,6 +504,18 @@ class TtlockBleConnection:
                         self._inventory_diagnostics.update(
                             reason=AccessFailure.CLEANUP.value, stage="cleanup"
                         )
+
+    @staticmethod
+    async def _async_inventory_result(
+        client: TTLockClient, method: str, *, private: bool
+    ) -> InventoryResult | AdministrativeInventory:
+        if private:
+            return await client.get_administrative_inventory(method)
+        if method == "keypad_pin":
+            return await client.get_passcodes()
+        if method == "fingerprint":
+            return await client.get_fingerprints()
+        return await client.get_cards()
 
     async def async_get_operation_log(self) -> list[LogEntry]:
         """

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from ttlock_ble import VirtualKey
 
+    from ..access_records import AccessRecordStore
     from ..connection import TtlockBleConnection
     from ..coordinator import TtlockBleDataUpdateCoordinator
     from .stored_key import TtlockBleStoredKey
@@ -27,3 +28,4 @@ class TtlockBleData:
     coordinator: TtlockBleDataUpdateCoordinator
     bluetooth_unsubs: list[CALLBACK_TYPE]
     first_refresh: asyncio.Task[None] | None = None
+    access_records: AccessRecordStore | None = None
