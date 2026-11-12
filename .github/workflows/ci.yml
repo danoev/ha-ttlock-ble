@@ -22,7 +22,7 @@ jobs:
 
   validate:
     needs: lint
-    uses: roquerodrigo/workflows/.github/workflows/home-assistant-validate.yml@main
+    uses: roquerodrigo/workflows/.github/workflows/home-assistant-validate.yml@ba707fed6502a50b23c9d055c714ad052410ee41 # Last validated revision before removal from main
 
   update-pr-branch:
     if: github.event_name == 'pull_request'

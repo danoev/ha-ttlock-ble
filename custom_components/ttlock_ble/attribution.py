@@ -50,12 +50,13 @@ PIN_MIN, PIN_MAX = 4, 9
 FINGERPRINT_BYTES, CARD_BYTES = 6, 4
 _SEQUENCE_MASK = 0xFFFF
 MAX_EVENT_AGE = timedelta(seconds=120)
-_HEX_LABEL = re.compile(r"(?<!\w)(?:[a-fA-F][ :.\-]*){7,}[a-fA-F](?!\w)")
+_HEX_LABEL = re.compile(r"(?<!\w)(?:[a-fA-F0-9][ :.\-]*){7,}[a-fA-F0-9](?!\w)")
+_NUMERIC_LABEL = re.compile(r"\d{4,}|(?<!\w)\d+(?!\w)")
 
 
 def human_label(name: str) -> bool:
     """Keep numeric/hex-like secrets out of newly entered display labels."""
-    return not any(char.isnumeric() for char in name) and not _HEX_LABEL.search(name)
+    return not (_NUMERIC_LABEL.search(name) or _HEX_LABEL.search(name))
 
 
 def supported_identifier(method: str, identifier: bytes) -> bool:
