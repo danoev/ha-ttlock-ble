@@ -105,7 +105,7 @@ async def test_lock_method_scope_expiry_validation_and_legacy_optout(hass):
     assert store.snapshot("b", "ic_card")["records"][0]["reference"] != ref
     with pytest.raises(ValueError, match="different scope"):
         await store.async_name("b", "ic_card", ref, "Wrong lock")
-    for name in ("x" * 65, "bad\x00label"):
+    for name in ("x" * 65, "bad\x00label", "004831", "Card AB12-CD34"):
         with pytest.raises(ValueError, match="Invalid display"):
             await store.async_name("a", "ic_card", ref, name)
     with (

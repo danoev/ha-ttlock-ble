@@ -13,6 +13,7 @@ from .const import DOMAIN, LOGGER
 
 if TYPE_CHECKING:
     import datetime as dt
+    from collections.abc import Callable
 
     from homeassistant.core import HomeAssistant
 
@@ -65,7 +66,13 @@ class TtlockBleLogHistory:
             )
             self._recent_sets[mac] = set(safe_identities)
 
-    def classify(self, mac: str, entries: list[LogEntry]) -> list[LogEntry]:
+    def classify(
+        self,
+        mac: str,
+        entries: list[LogEntry],
+        *,
+        on_unseen: Callable[[LogEntry], None] | None = None,
+    ) -> list[LogEntry]:
         """Return definitely post-start unseen records and journal every identity."""
         recent = self._recent.setdefault(
             mac,
@@ -87,6 +94,8 @@ class TtlockBleLogHistory:
             recent.append(identity)
             recent_set.add(identity)
             changed = True
+            if on_unseen is not None:
+                on_unseen(entry)
             if (
                 entry.operate_date is not None
                 and entry.operate_date > self._startup_cutoff

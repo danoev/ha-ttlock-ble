@@ -34,7 +34,19 @@ class TTLockAccessPanel extends HTMLElement {
     this._lock.onchange = () => this.state(); this._method.onchange = () => this.state();
     this._read = this.button('Read fresh inventory', () => this.action('read'));
     this.el('p', 'Read-only inventories yield to Lock/Unlock. Cursor completion does not discover all unused offline/batch PINs. S31 counts were corroborated: PIN 1, fingerprint 2, card 2; other firmware requires validation. Schedules remain unverified.');
-    this._summary = this.el('p'); this._table = this.el('div');
+    this._summary = this.el('p');
+    this.el('p', 'Identify a fresh permanent record, wait for Ready, then use that exact credential once in an ordinary permitted unlock. Check the new log, explicitly confirm the match, then save a label. Do not type a PIN, card number or other secret. A label never verifies a person.');
+    this._identification = this.el('div');
+    this._identification.setAttribute('aria-live', 'polite');
+    this._publication = this.button('Share credential labels with Home Assistant', () => {
+      const enabled = !this._publicationEnabled;
+      if (enabled && !window.confirm('Share future confirmed credential labels in normal Home Assistant events, automation traces and Recorder? Other HA users may see them. Turning this off does not erase previously published labels. Sharing resets on reload.')) return;
+      this.action('publication', {enabled, confirm:'share_labels_with_recorder'});
+    });
+    this._publication.dataset.guard = '1';
+    this._publication.disabled = true;
+    this.el('p', 'Credential labels are private by default. Optional sharing applies to future exact, individually confirmed matches for this lock until reload. It never verifies the person using a shared credential.');
+    this._table = this.el('div');
     this._legacy = this.button('Disable legacy PIN write services for this lock', () => this.action('legacy', {disabled: !this._legacyDisabled}));
     this.el('p', 'Legacy add/delete/clear PIN services are deprecated for confidential use. HA can record their inputs before the handler. Disabling stops BLE writes but cannot erase values already sent to HA. Existing automations remain enabled until an administrator explicitly disables them.', this._root).className='warning';
     this.button('Forget local labels and references', () => {
@@ -77,7 +89,7 @@ class TTLockAccessPanel extends HTMLElement {
     const generation=this._generation;
     // Freeze selectors so an in-flight result cannot be labelled as a different lock.
     for (const el of this._root.querySelectorAll('button,select,input')) el.disabled=true;
-    this._status.textContent=action==='read'?'Reading; explicit lock control has priority…':'Updating local metadata…';
+    this._status.textContent=action==='read'?'Reading; explicit lock control has priority…':action==='identify_start'?'Reading the log baseline. Wait for Ready before using the credential…':action==='identify_check'?'Checking the new log; explicit lock control has priority…':'Updating local metadata…';
     try {
       const data=await this.request({action,entry_id:lock.entry_id,lock:lock.lock,method:this._method.value,...extra});
       if (generation!==this._generation || !this.isConnected) return;
@@ -91,7 +103,7 @@ class TTLockAccessPanel extends HTMLElement {
       const cached=this._snapshots.get(scope);
       // Preserve only this lock/method's last known metadata. A failed response
       // cannot establish physical absence, freshness, or permission to name.
-      const unverified={...(cached || {}),fresh:false,records:(cached?.records || []).map(record=>({...record,present:null,stale:true,observation:'previously_observed_unverified'}))};
+      const unverified={...(cached || {}),fresh:false,identification:null,publication_enabled:undefined,verified_references:[],records:(cached?.records || []).map(record=>({...record,present:null,stale:true,observation:'previously_observed_unverified'}))};
       if (cached) this._snapshots.set(scope,unverified);
       this.render(unverified);
       this._summary.textContent='Last-known local labels only. Inventory could not be verified; no physical deletion is established.';
@@ -101,12 +113,47 @@ class TTLockAccessPanel extends HTMLElement {
       this._busy=false;
       this._lock.disabled=false; this._method.disabled=false;
       // Rebuild controls from safe state; writes always stay disabled.
-      for (const button of this._root.querySelectorAll('button')) if (!['Create credential','Modify credential / schedule','Delete credential','Save name'].includes(button.textContent)) button.disabled=false;
+      for (const button of this._root.querySelectorAll('button')) if (!button.dataset.guard && !['Create credential','Modify credential / schedule','Delete credential','Save name'].includes(button.textContent)) button.disabled=false;
       this._legacy.disabled=!this._legacyKnown;
       }
     }
   }
+  renderIdentification(data) {
+    this._publicationEnabled=data.publication_enabled === true;
+    this._publication.disabled=typeof data.publication_enabled !== 'boolean';
+    this._publication.textContent=this._publicationEnabled?'Stop sharing credential labels':'Share credential labels with Home Assistant';
+    this._identification.replaceChildren();
+    const session=data.identification;
+    if (!session) {
+      this.el('p','No identification in progress. Unconfirmed credentials stay unattributed.',this._identification);
+      return;
+    }
+    const messages={
+      preparing:'Reading the baseline. Do not operate the credential yet.',
+      waiting:'Ready. Use only the selected credential once, then check the operation log.',
+      matched:'One new log record exactly matches the selected credential. Check the log if confirmation is not yet available.',
+      unmatched:'The new log does not match the selected credential. Cancel and try again.',
+      ambiguous:'More than one possible match or operation. Cancel and try again with one ordinary unlock.',
+      unsupported:'This log layout or credential validity is unverified. No attribution was made.',
+      stale:'The inventory is stale. Read it again before identifying.',
+      busy:'Another administrator session is identifying a credential for this lock.',
+    };
+    this.el('p',messages[session.status] || 'Identification unavailable.',this._identification);
+    if (!session.session) return;
+    const buttons=this.el('div',undefined,this._identification);
+    if (session.method===this._method.value && session.status!=='preparing') {
+      this.button('Check operation log',()=>this.action('identify_check',{session:session.session}),buttons);
+      const confirm=this.button('Confirm observed credential',()=>{
+        if (window.confirm('Confirm that you used the selected credential for this ordinary unlock. This verifies the credential match, not a person.')) this.action('identify_confirm',{session:session.session,confirm:'observed_credential_use'});
+      },buttons);
+      confirm.dataset.guard='1';
+      confirm.disabled=!session.can_confirm || !data.fresh;
+    }
+    this.button('Cancel identification',()=>this.action('identify_cancel',{session:session.session}),buttons);
+    this.el('p',`Session expires within ${session.seconds_remaining} seconds.`,this._identification);
+  }
   render(data) {
+    this.renderIdentification(data);
     this._records=data.records; this._legacyDisabled=data.legacy_pin_writes_disabled;
     this._legacyKnown=typeof this._legacyDisabled==='boolean';
     this._legacy.textContent=this._legacyDisabled?'Re-enable legacy PIN write services for this lock':'Disable legacy PIN write services for this lock';
@@ -122,6 +169,10 @@ class TTLockAccessPanel extends HTMLElement {
       input.type='text'; input.maxLength=64; input.value=record.name; input.autocomplete='off'; input.setAttribute('aria-label',`Label for record ${index+1}`);
       input.disabled=record.stale;
       const save=this.button('Save name',()=>this.action('name',{reference:record.reference,name:input.value}),cell); save.disabled=record.stale;
+      const identify=this.button('Identify credential',()=>this.action('identify_start',{reference:record.reference}),cell);
+      identify.dataset.guard='1';
+      identify.disabled=record.stale || record.validity!=='permanent' || Boolean(data.identification);
+      this.el('p',(data.verified_references || []).includes(record.reference) ? 'Exact credential match confirmed for this fresh inventory. You may save a label.' : 'Individual credential match unverified.',cell);
       if (record.name && !record.alias_confirmed_this_session) this.el('p','Stored label unconfirmed after restart; review and save to confirm.',cell);
     }
   }

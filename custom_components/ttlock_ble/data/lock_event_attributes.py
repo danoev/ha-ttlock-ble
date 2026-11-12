@@ -19,6 +19,7 @@ class TtlockBleLogEventAttributes(TypedDict):
     method: str
     battery: int
     timestamp: NotRequired[str]
-    uid: NotRequired[int]
-    key_id: NotRequired[int]
+    credential_label: NotRequired[str]
+    credential_method: NotRequired[str]
+    attribution_status: NotRequired[str]
     accessory_battery: NotRequired[int]

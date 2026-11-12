@@ -12,6 +12,7 @@ from custom_components.ttlock_ble.event import (
     _operation_method,
     _record_type_name,
 )
+from custom_components.ttlock_ble.operation_log import PublicLogRecord
 
 
 def _log_state(hass):
@@ -80,7 +81,7 @@ async def test_log_event_fires_on_new_record(
     async_dispatcher_send(
         hass,
         log_signal(sample_virtual_key.lockMac),
-        entry,
+        PublicLogRecord.from_entry(entry),
     )
     await hass.async_block_till_done()
     state = _log_state(hass)
@@ -89,7 +90,7 @@ async def test_log_event_fires_on_new_record(
     assert state.attributes["timestamp"] == "2026-05-17T10:00:00"
     assert state.attributes["battery"] == 85
     assert state.attributes["method"] == "passcode"
-    assert state.attributes["uid"] == 1234
+    assert "uid" not in state.attributes
     # The keypad code itself must never reach the recorder / the API.
     assert "credential" not in state.attributes
 
@@ -107,7 +108,9 @@ async def test_log_event_does_not_publish_overloaded_card_credential(
         lock_battery=85,
         password="3819472054",
     )
-    async_dispatcher_send(hass, log_signal(sample_virtual_key.lockMac), entry)
+    async_dispatcher_send(
+        hass, log_signal(sample_virtual_key.lockMac), PublicLogRecord.from_entry(entry)
+    )
     await hass.async_block_till_done()
     attributes = _log_state(hass).attributes
     assert "credential" not in attributes
@@ -131,19 +134,23 @@ async def test_log_event_redacts_every_passcode_record_type(
             lock_battery=85,
             password="998877",
         )
-        async_dispatcher_send(hass, log_signal(sample_virtual_key.lockMac), entry)
+        async_dispatcher_send(
+            hass,
+            log_signal(sample_virtual_key.lockMac),
+            PublicLogRecord.from_entry(entry),
+        )
         await hass.async_block_till_done()
         attributes = _log_state(hass).attributes
         assert "credential" not in attributes, record_type
         assert "credential_id" not in attributes, record_type
 
 
-async def test_log_event_includes_key_id_and_accessory_battery(
+async def test_log_event_redacts_key_id_but_keeps_accessory_battery(
     hass,
     setup_integration,
     sample_virtual_key,
 ) -> None:
-    """Optional `key_id` / `accessory_battery` fields land in event attributes."""
+    """Accessory battery is public; the raw key ID is not."""
     entry = LogEntry(
         record_number=2,
         record_type=int(LogOperate.OPERATE_BLE_LOCK),
@@ -155,12 +162,12 @@ async def test_log_event_includes_key_id_and_accessory_battery(
     async_dispatcher_send(
         hass,
         log_signal(sample_virtual_key.lockMac),
-        entry,
+        PublicLogRecord.from_entry(entry),
     )
     await hass.async_block_till_done()
     state = _log_state(hass)
     assert state.attributes["event_type"] == "lock"
-    assert state.attributes["key_id"] == 99
+    assert "key_id" not in state.attributes
     assert state.attributes["accessory_battery"] == 55
     assert "timestamp" not in state.attributes
 

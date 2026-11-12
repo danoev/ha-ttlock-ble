@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.6.0 (unreleased)
+
+- Add private exact credential matching and an administrator-guided verification
+  flow for individual read-only inventory records. Hardware equivalence is
+  unverified until each credential is independently supervised.
+- Keep labels private unless an administrator explicitly enables sharing.
+  Publish only confirmed credential labels; remove raw SDK IDs from log events.
+- Revoke evidence on uncertainty, detected credential changes, inventory refresh,
+  reset and reload. No credential writes, person inference or Alarmo disarming.
+- Preserve the 3.5.2 maintenance reconciliation behaviour.
+  See [credential attribution and hardware validation](docs/CREDENTIAL_ATTRIBUTION.md).
+
 ## 3.5.2 (unreleased candidate)
 
 - Bound and deduplicate delayed connected state verification after an observed

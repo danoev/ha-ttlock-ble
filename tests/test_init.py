@@ -272,6 +272,7 @@ async def test_reconnect_options_reach_the_connections(
             ANY,
             reconnect_cooldown_seconds=expected_cooldown,
             log_history=ANY,
+            access_records=entry.runtime_data.access_records,
         )
         instance.async_start.assert_awaited_once_with(
             maintain=expected_maintenance,

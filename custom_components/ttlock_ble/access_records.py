@@ -10,6 +10,13 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import storage
 
+from .attribution import (
+    RECORD_TYPES,
+    CredentialAttribution,
+    Match,
+    human_label,
+    supported_identifier,
+)
 from .credential_references import ProtectedCredentialReferences
 from .validation import vol
 
@@ -88,6 +95,7 @@ class AccessRecordStore:
         self._revision: dict[str, int] = {}
         self._confirmed: set[str] = set()
         self._observed: dict[str, set[str]] = {}
+        self.attribution = CredentialAttribution(self)
 
     async def async_load(self) -> None:
         """Restart is stale; malformed storage fails closed without data echo."""
@@ -116,6 +124,7 @@ class AccessRecordStore:
     def mark_stale(self, lock: str, method: str) -> int:
         """Invalidate older reads as well as freshness; return an operation ticket."""
         scope = self._scope(lock, method)
+        self.attribution.revoke(lock, method)
         self._fresh.pop(scope, None)
         self._observed.pop(scope, None)
         self._revision[scope] = self._revision.get(scope, 0) + 1
@@ -205,12 +214,69 @@ class AccessRecordStore:
                 self._observed[scope] = observed
                 self._fresh[scope] = monotonic()
 
+    def _is_fresh(self, scope: str) -> bool:
+        return scope in self._fresh and monotonic() - self._fresh[scope] < FRESH_SECONDS
+
+    def attribution_eligible(self, lock: str, method: str, reference: str) -> bool:
+        """Only currently observed permanent records qualify for supervised proof."""
+        scope = self._scope(lock, method)
+        return (
+            self._is_fresh(scope)
+            and reference in self._observed.get(scope, set())
+            and any(
+                row["reference"] == reference
+                and row["active"]
+                and row["validity"] == "permanent"
+                for row in self._scopes[scope]["records"]
+            )
+        )
+
+    def match_credential(self, lock: str, method: str, identifier: bytes) -> Match:
+        """Resolve exact byte evidence to one current epoch/type-scoped reference."""
+        if not supported_identifier(method, identifier):
+            return Match("unsupported")
+        scope = self._scope(lock, method)
+        if not self._is_fresh(scope):
+            return Match("stale")
+        state = self._scopes[scope]
+        tokens = {
+            self._refs.from_verified_record(
+                lock, method, state["epoch"] + "/" + record_type, identifier
+            ).token
+            for record_type in RECORD_TYPES[method]
+        }
+        observed = self._observed.get(scope, set())
+        candidates = [row for row in state["records"] if row["base"] in tokens]
+        matches = [
+            row for row in candidates if row["active"] and row["reference"] in observed
+        ]
+        if len(matches) > 1:
+            return Match("ambiguous")
+        if not matches:
+            return Match("stale" if candidates else "unmatched")
+        if matches[0]["validity"] != "permanent":
+            return Match("unsupported")
+        return Match("matched", matches[0]["reference"])
+
+    def require_label_review(self, reference: str) -> None:
+        """Never carry a previously saved name into newly confirmed evidence."""
+        self._confirmed.discard(reference)
+
+    def attribution_label(self, lock: str, method: str, reference: str) -> str | None:
+        """Use only an explicitly saved, currently confirmed local label."""
+        if reference not in self._confirmed or not self.attribution_eligible(
+            lock, method, reference
+        ):
+            return None
+        for record in self._scopes[self._scope(lock, method)]["records"]:
+            if record["reference"] == reference:
+                return str(record["alias"])
+        return None
+
     def snapshot(self, lock: str, method: str) -> dict[str, Any]:
         """Explicit safe projection; no generic SDK/dataclass serialization."""
         scope = self._scope(lock, method)
-        fresh = (
-            scope in self._fresh and monotonic() - self._fresh[scope] < FRESH_SECONDS
-        )
+        fresh = self._is_fresh(scope)
         state = self._scopes.get(scope, {"records": []})
         return {
             "fresh": fresh,
@@ -247,7 +313,11 @@ class AccessRecordStore:
         self, lock: str, method: str, reference: str, name: str
     ) -> None:
         """Rename only a fresh active reference in this lock/method scope."""
-        if len(name) > MAX_NAME or any(ord(c) < SPACE_ORDINAL for c in name):
+        if (
+            len(name) > MAX_NAME
+            or any(ord(c) < SPACE_ORDINAL for c in name)
+            or not human_label(name)
+        ):
             msg = "Invalid display name"
             raise ValueError(msg)
         scope = self._scope(lock, method)
@@ -262,9 +332,17 @@ class AccessRecordStore:
                     and record["active"]
                     and reference in self._observed.get(scope, set())
                 ):
+                    revision = self._revision[scope]
+                    previous = record["alias"]
+                    self._confirmed.discard(reference)
                     record["alias"] = name.strip()
-                    await self._save()
-                    self._confirmed.add(reference)
+                    try:
+                        await self._save()
+                    except Exception, asyncio.CancelledError:
+                        record["alias"] = previous
+                        raise
+                    if revision == self._revision[scope] and self._is_fresh(scope):
+                        self._confirmed.add(reference)
                     return
             msg = "Reference is stale or belongs to a different scope"
             raise ValueError(msg)
@@ -292,6 +370,7 @@ class AccessRecordStore:
             self._revision = {
                 scope: revision + 1 for scope, revision in self._revision.items()
             }
+            self.attribution.close()
             self._fresh.clear()
             self._observed.clear()
             self._confirmed.clear()

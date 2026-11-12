@@ -23,9 +23,8 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-    from ttlock_ble import LogEntry
-
     from .data import TtlockBleConfigEntry, TtlockBleLogEventAttributes
+    from .operation_log import PublicLogRecord
 
 
 LOG_EVENT_TYPES: list[str] = [
@@ -273,7 +272,7 @@ class TtlockBleLogEvent(TtlockBleEntity, EventEntity):
         )
 
     @callback
-    def _on_log_entry(self, entry: LogEntry) -> None:
+    def _on_log_entry(self, entry: PublicLogRecord) -> None:
         """Translate a LogEntry into an HA event fire."""
         event_type = _classify_record(entry.record_type)
         attributes: TtlockBleLogEventAttributes = {
@@ -283,10 +282,10 @@ class TtlockBleLogEvent(TtlockBleEntity, EventEntity):
         }
         if entry.operate_date is not None:
             attributes["timestamp"] = entry.operate_date.isoformat()
-        if entry.uid is not None:
-            attributes["uid"] = entry.uid
-        if entry.key_id is not None:
-            attributes["key_id"] = entry.key_id
+        if entry.attribution is not None:
+            attributes["credential_label"] = entry.attribution.label
+            attributes["credential_method"] = entry.attribution.method
+            attributes["attribution_status"] = "credential_confirmed"
         if entry.accessory_battery is not None:
             attributes["accessory_battery"] = entry.accessory_battery
         self._trigger_event(event_type, dict(attributes))

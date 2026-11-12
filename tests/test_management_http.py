@@ -12,6 +12,7 @@ from homeassistant.auth.models import (
     TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN,
     TOKEN_TYPE_SYSTEM,
 )
+from homeassistant.components.http.const import KEY_HASS_REFRESH_TOKEN_ID
 from homeassistant.core import EVENT_CALL_SERVICE
 from pytest_homeassistant_custom_component.common import MockUser
 from ttlock_ble import (
@@ -283,7 +284,7 @@ async def test_http_cancellation_propagates_without_inventing_records(hass):
         ),
         pytest.raises(asyncio.CancelledError),
     ):
-        await view.post(None)
+        await view.post({KEY_HASS_REFRESH_TOKEN_ID: "synthetic-normal-session"})
 
 
 @pytest.mark.parametrize(("interrupted", "cleaned"), [(True, True), (False, False)])

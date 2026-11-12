@@ -12,7 +12,7 @@ try {
   const requests=[];
   let failure=null;
   let heldRoute, holdRead=false;
-  const snapshot={fresh:true,legacy_pin_writes_disabled:false,records:[{reference:'a'.repeat(32),name:'Stored label',record_type:'pin_type_1',validity:'permanent',present:true,stale:false,observation:'observed',limited_pin_coverage:true,revocation_verified:false,alias_confirmed_this_session:true}]};
+  const snapshot={fresh:true,legacy_pin_writes_disabled:false,publication_enabled:false,identification:null,verified_references:[],records:[{reference:'a'.repeat(32),name:'Stored label',record_type:'pin_type_1',validity:'permanent',present:true,stale:false,observation:'observed',limited_pin_coverage:true,revocation_verified:false,alias_confirmed_this_session:true}]};
   await page.route('http://fixture.invalid/**',async route=>{
     const url=route.request().url();
     if (url.endsWith('/panel.js')) return route.fulfill({contentType:'application/javascript',body:source});
@@ -24,6 +24,18 @@ try {
     if (failure==='json') return route.fulfill({contentType:'application/json',body:'invalid-json'});
     if (typeof failure==='number') return route.fulfill({status:failure,json:{error:'synthetic-private-error-never-display'}});
     if (request.action==='name') snapshot.records[0].name=request.name;
+    if (request.action==='identify_start') snapshot.identification={session:'b'.repeat(32),method:'keypad_pin',reference:request.reference,status:'waiting',can_confirm:false,seconds_remaining:90};
+    if (request.action==='identify_check') snapshot.identification={...snapshot.identification,status:'matched',can_confirm:true};
+    if (request.action==='identify_cancel') snapshot.identification=null;
+    if (request.action==='identify_confirm') {
+      assert.equal(request.confirm,'observed_credential_use');
+      snapshot.verified_references=[snapshot.identification.reference];
+      snapshot.identification=null;
+    }
+    if (request.action==='publication') {
+      assert.equal(request.confirm,'share_labels_with_recorder');
+      snapshot.publication_enabled=request.enabled;
+    }
     return route.fulfill({json:failure==='partial' ? {...snapshot,fresh:false,records:snapshot.records.map(r=>({...r,stale:true,present:null,observation:'previously_observed_unverified'})),inventory:{count:0,enumeration_complete:false,transport_interrupted:true}} : snapshot});
   });
   await page.goto('http://fixture.invalid/');
@@ -76,7 +88,32 @@ try {
   if (heldRoute) await heldRoute.fulfill({json:{...snapshot,fresh:false,records:[]}}).catch(()=>{});
   assert.equal(await label.inputValue(),'Reattached label');
   for (const name of ['Create credential','Modify credential / schedule','Delete credential']) assert(await page.getByRole('button',{name,exact:true}).isDisabled());
-  assert(!requests.some(r=>['reset','create','delete','modify','name'].includes(r.action)));
+  const identify=page.getByRole('button',{name:'Identify credential',exact:true});
+  await identify.click();
+  await page.getByText('Ready. Use only the selected credential once',{exact:false}).waitFor();
+  const confirm=page.getByRole('button',{name:'Confirm observed credential',exact:true});
+  assert(await confirm.isDisabled());
+  await page.getByRole('button',{name:'Cancel identification',exact:true}).click();
+  await page.getByText('No identification in progress',{exact:false}).waitFor();
+  await identify.click();
+  await page.getByRole('button',{name:'Check operation log',exact:true}).click();
+  await page.getByText('One new log record exactly matches',{exact:false}).waitFor();
+  assert(!(await confirm.isDisabled()));
+  page.once('dialog',dialog=>dialog.accept());
+  await confirm.click();
+  await page.getByText('Exact credential match confirmed',{exact:false}).waitFor();
+  await label.fill('Household PIN');
+  await page.getByRole('button',{name:'Save name',exact:true}).click();
+  await status.filter({hasText:'Fresh observed records'}).waitFor();
+  page.once('dialog',dialog=>dialog.dismiss());
+  await page.getByRole('button',{name:'Share credential labels with Home Assistant',exact:true}).click();
+  assert(!requests.some(r=>r.action==='publication'));
+  page.once('dialog',dialog=>dialog.accept());
+  await page.getByRole('button',{name:'Share credential labels with Home Assistant',exact:true}).click();
+  await page.getByRole('button',{name:'Stop sharing credential labels',exact:true}).click();
+  await page.getByRole('button',{name:'Share credential labels with Home Assistant',exact:true}).waitFor();
+  assert(!requests.some(r=>['reset','create','delete','modify'].includes(r.action)));
+  assert(!requests.some(r=>['pin','password','uid','identifier'].some(k=>k in r)));
   assert.deepEqual(errors,[]);
-  console.log('PASS: Chromium retained scoped labels across HTTP/auth/network/JSON/partial-read failures, disabled stale naming, recovered without reset, and distinguished limited PIN absence. No writes.');
+  console.log('PASS: Chromium retained scoped labels across HTTP/auth/network/JSON/partial-read failures, disabled stale naming, recovered without reset, and distinguished limited PIN absence, and exercised guided confirmation and explicit disclosure consent. No credential writes.');
 } finally { await browser.close(); }

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .data import TtlockBleConfigEntry
 
 URL = "/api/ttlock_ble/administration"
-STATIC_URL = "/ttlock-ble-admin/3.5.2.js"
+STATIC_URL = "/ttlock-ble-admin/3.6.0.js"
 _BODY_LIMIT = 4096
 _ID = vol.All(str, vol.Length(min=1, max=128))
 _BASE = {
@@ -37,6 +37,12 @@ _BASE = {
     vol.Required("lock"): _ID,
 }
 _METHOD = vol.In({"keypad_pin", "fingerprint", "ic_card"})
+_HANDLE = vol.Match(r"^[0-9a-f]{32}$")
+_IDENTIFICATION = {
+    **_BASE,
+    vol.Required("method"): _METHOD,
+    vol.Required("session"): _HANDLE,
+}
 _SCHEMAS = {
     "list": vol.Schema({vol.Required("action"): vol.Equal("list")}),
     "state": vol.Schema({**_BASE, vol.Required("method"): _METHOD}),
@@ -45,7 +51,7 @@ _SCHEMAS = {
         {
             **_BASE,
             vol.Required("method"): _METHOD,
-            vol.Required("reference"): vol.Match(r"^[0-9a-f]{32}$"),
+            vol.Required("reference"): _HANDLE,
             vol.Required("name"): vol.All(str, vol.Length(max=64)),
         }
     ),
@@ -54,6 +60,25 @@ _SCHEMAS = {
             **_BASE,
             vol.Required("method"): _METHOD,
             vol.Required("confirm"): vol.Equal("forget_local_labels"),
+        }
+    ),
+    "identify_start": vol.Schema(
+        {**_BASE, vol.Required("method"): _METHOD, vol.Required("reference"): _HANDLE}
+    ),
+    "identify_check": vol.Schema(_IDENTIFICATION),
+    "identify_cancel": vol.Schema(_IDENTIFICATION),
+    "identify_confirm": vol.Schema(
+        {
+            **_IDENTIFICATION,
+            vol.Required("confirm"): vol.Equal("observed_credential_use"),
+        }
+    ),
+    "publication": vol.Schema(
+        {
+            **_BASE,
+            vol.Required("method"): _METHOD,
+            vol.Required("enabled"): bool,
+            vol.Required("confirm"): vol.Equal("share_labels_with_recorder"),
         }
     ),
     "legacy": vol.Schema(
@@ -123,7 +148,9 @@ class AdministrationView(HomeAssistantView):
             async with asyncio.timeout(3):
                 data = await self._body(request)
             async with asyncio.timeout(40):
-                return _response(await self._dispatch(data))
+                return _response(
+                    await self._dispatch(data, owner=request[KEY_HASS_REFRESH_TOKEN_ID])
+                )
         except ValueError, vol.Invalid, TimeoutError:
             return _response({"error": "invalid_request_or_stale_reference"}, 400)
         except asyncio.CancelledError:
@@ -174,7 +201,9 @@ class AdministrationView(HomeAssistantView):
             raise ValueError(msg)
         return connection, records
 
-    async def _dispatch(self, data: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch(
+        self, data: dict[str, Any], *, owner: str = ""
+    ) -> dict[str, Any]:
         action = data["action"]
         if action == "list":
             return {
@@ -219,7 +248,48 @@ class AdministrationView(HomeAssistantView):
             await records.async_reset(lock, method)
         elif action == "legacy":
             await records.async_set_legacy_disabled(lock, disabled=data["disabled"])
-        return {**response, **records.snapshot(lock, method), "new_writes": "disabled"}
+        elif action.startswith("identify_") or action == "publication":
+            await self._attribution_action(connection, records, data, owner)
+        return {
+            **response,
+            **records.snapshot(lock, method),
+            **records.attribution.snapshot(lock, method, owner),
+            "new_writes": "disabled",
+        }
+
+    @staticmethod
+    async def _attribution_action(
+        connection: TtlockBleConnection,
+        records: AccessRecordStore,
+        data: dict[str, Any],
+        owner: str,
+    ) -> None:
+        if not owner:
+            msg = "Administrator session required"
+            raise ValueError(msg)
+        attribution = records.attribution
+        action, lock = data["action"], data["lock"]
+        if action == "identify_start":
+            await attribution.async_begin(
+                lock,
+                data["method"],
+                data["reference"],
+                owner,
+                connection.async_check_identification_log,
+            )
+        elif action == "identify_check":
+            await attribution.async_check(
+                lock,
+                owner,
+                data["session"],
+                connection.async_check_identification_log,
+            )
+        elif action == "identify_confirm":
+            attribution.confirm(lock, owner, data["session"])
+        elif action == "identify_cancel":
+            attribution.cancel(lock, owner, data["session"])
+        else:
+            attribution.set_publication(lock, enabled=data["enabled"])
 
 
 async def async_setup_management(hass: HomeAssistant) -> None:
