@@ -158,6 +158,7 @@ async def async_setup_entry(
             key,
             reconnect_cooldown_seconds=reconnect_cooldown_seconds,
             log_history=log_history,
+            access_records=access_records,
         )
         for key in virtual_keys
     }
@@ -195,6 +196,8 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_shutdown)
     entry.async_on_unload(_stop_advertisement_tracking)
     entry.async_on_unload(log_history.async_save)
+    if access_records is not None:
+        entry.async_on_unload(access_records.attribution.close)
 
     # Trigger the first state refresh without awaiting it, so the config entry
     # can finish loading while connections settle. The task is still tracked by

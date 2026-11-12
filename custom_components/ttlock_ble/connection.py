@@ -50,6 +50,7 @@ from .access import AccessFailure, AccessInventoryError
 from .client import ControlOutcomeUnknownError, TtlockBleClient
 from .const import DEFAULT_RECONNECT_INTERVAL_SECONDS, DOMAIN, LOGGER
 from .log_history import TtlockBleLogHistory
+from .operation_log import PublicLogRecord
 
 # These public diagnostic helpers were introduced after the declared HA floor.
 # Their absence must never prevent setup or change acquisition/control behavior.
@@ -67,6 +68,8 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     from ttlock_ble import LockEvent, LogEntry, VirtualKey
+
+    from .access_records import AccessRecordStore
 
 
 RECONNECT_INITIAL_BACKOFF = 1.0
@@ -158,7 +161,7 @@ def event_signal(mac: str) -> str:
 
 
 def log_signal(mac: str) -> str:
-    """Dispatcher signal that carries `LogEntry` records for `mac`."""
+    """Dispatcher signal for credential-free operation records only."""
     return f"{DOMAIN}_log_{mac.lower()}"
 
 
@@ -176,6 +179,7 @@ class TtlockBleConnection:
         key: VirtualKey,
         reconnect_cooldown_seconds: float = DEFAULT_RECONNECT_INTERVAL_SECONDS,
         log_history: TtlockBleLogHistory | None = None,
+        access_records: AccessRecordStore | None = None,
     ) -> None:
         """
         Bind to the HA instance and the credentials for a single lock.
@@ -203,6 +207,8 @@ class TtlockBleConnection:
         ) = None
         self._control_requests = 0
         self._activity_state_task: asyncio.Task[object] | None = None
+        self._identification_log_task: asyncio.Task[object] | None = None
+        self._access_records = access_records
         self._state_listener: (
             Callable[[LockState | None, int | None, str], None] | None
         ) = None
@@ -259,6 +265,8 @@ class TtlockBleConnection:
             self._inventory_task.cancel()
         if self._activity_state_task is not None:
             self._activity_state_task.cancel()
+        if self._identification_log_task is not None:
+            self._identification_log_task.cancel()
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -416,6 +424,7 @@ class TtlockBleConnection:
         end_date: str,
     ) -> None:
         """Add a permanent or time-windowed keypad passcode."""
+        self._invalidate_pin_attribution()
         await self._async_run_management_command(
             "add passcode",
             lambda client: client.add_passcode(
@@ -434,6 +443,7 @@ class TtlockBleConnection:
         pwd_type: KeyboardPwdType,
     ) -> None:
         """Delete one keypad passcode without retaining it locally."""
+        self._invalidate_pin_attribution()
         await self._async_run_management_command(
             "delete passcode",
             lambda client: client.delete_passcode(code, pwd_type=pwd_type),
@@ -442,6 +452,7 @@ class TtlockBleConnection:
 
     async def async_clear_passcodes(self) -> None:
         """Remove every keypad passcode from the lock."""
+        self._invalidate_pin_attribution()
         await self._async_run_management_command(
             "clear passcodes",
             lambda client: client.clear_passcodes(),
@@ -611,60 +622,98 @@ class TtlockBleConnection:
             return await client.get_fingerprints()
         return await client.get_cards()
 
-    async def async_get_operation_log(self) -> list[LogEntry]:
-        """
-        Fetch operation records from the lock and dispatch the new ones.
+    def _invalidate_pin_attribution(self) -> None:
+        if self._access_records is not None:
+            self._access_records.mark_stale(self._key.lockMac, "keypad_pin")
 
-        Classification uses a bounded persisted identity journal and this
-        config-entry load's wall-clock boundary. That survives record-number
-        wrap and firmware replay while conservatively suppressing entries whose
-        timestamp cannot prove they happened after this load began.
-        """
+    def _invalidate_incomplete_log(self) -> None:
+        if self._access_records is not None:
+            self._access_records.attribution.note_incomplete(self._key.lockMac)
+
+    async def async_get_operation_log(self) -> list[PublicLogRecord]:
+        """Fetch operation logs and dispatch only replay-filtered safe records."""
         async with self._lock:
             client = await self._async_ensure_connected_locked(
                 intent=_AcquisitionIntent.OPERATION_LOG,
                 reason="operation log",
             )
             if client is None:
-                LOGGER.warning("get_operation_log: no client for %s", self._key.lockMac)
                 return []
             try:
                 entries = await client.get_operation_log(
                     max_entries=MAX_LOG_ENTRIES_PER_FETCH,
+                    on_incomplete=self._invalidate_incomplete_log
+                    if self._access_records is not None
+                    else None,
                 )
-            except Exception as exc:  # noqa: BLE001
-                # `TTLockError` alone is not enough: the SDK's log path
-                # reaches `aes_decrypt` unwrapped and raises `ValueError`
-                # on a garbled frame, and `bleak` raises `BleakError` when
-                # the link drops mid-fetch. Letting those out would fail
-                # the whole poll and discard the state read that already
-                # succeeded, leaving the lock entity reporting a stale
-                # value instead of merely losing its history.
-                LOGGER.warning(
-                    "get_operation_log failed for %s: %s",
-                    self._key.lockMac,
-                    exc,
-                )
+            except Exception:  # noqa: BLE001 -- transport details may contain credential data
+                self._invalidate_incomplete_log()
+                LOGGER.warning("Operation log read failed for %s", self._key.lockMac)
                 return []
-        LOGGER.debug(
-            "get_operation_log for %s: %d entries",
-            self._key.lockMac,
-            len(entries),
-        )
-        new_entries = self._log_history.classify(self._key.lockMac, entries)
-        if new_entries:
-            LOGGER.debug(
-                "Lock %s: dispatching %d new log entries",
-                self._key.lockMac,
-                len(new_entries),
-            )
-            for entry in new_entries:
-                async_dispatcher_send(
-                    self._hass,
-                    log_signal(self._key.lockMac),
-                    entry,
+            return self._publish_operation_log(entries)
+
+    async def async_check_identification_log(self) -> bool:
+        """Read a complete log for a challenge; yield to control and own cleanup."""
+        if self._control_requests or self._lock.locked() or self._closing:
+            return False
+        self._identification_log_task = asyncio.current_task()
+        async with self._lock:
+            entries: list[LogEntry] | None = None
+            try:
+                async with asyncio.timeout(ACTIVITY_STATE_TIMEOUT_SECONDS):
+                    client = await self._async_ensure_connected_locked(
+                        intent=_AcquisitionIntent.OPERATION_LOG,
+                        reason="read-only identification log",
+                    )
+                    if client is not None:
+                        entries = await client.get_operation_log(
+                            max_entries=MAX_LOG_ENTRIES_PER_FETCH,
+                            require_complete=True,
+                        )
+            except asyncio.CancelledError:
+                self._invalidate_incomplete_log()
+                raise
+            except Exception:  # noqa: BLE001 -- never echo transport errors
+                self._invalidate_incomplete_log()
+                LOGGER.debug(
+                    "Identification log read unavailable for %s", self._key.lockMac
                 )
-        return new_entries
+            finally:
+                try:
+                    cleaned = await self._async_disconnect_locked(
+                        reason="identification log complete"
+                    )
+                except asyncio.CancelledError:
+                    self._invalidate_incomplete_log()
+                    raise
+                finally:
+                    self._identification_log_task = None
+            if entries is None or not cleaned:
+                self._invalidate_incomplete_log()
+                return False
+            self._publish_operation_log(entries)
+            return True
+
+    def _publish_operation_log(self, entries: list[LogEntry]) -> list[PublicLogRecord]:
+        mac = self._key.lockMac
+        attribution = (
+            self._access_records.attribution
+            if self._access_records is not None
+            else None
+        )
+        if len(entries) >= MAX_LOG_ENTRIES_PER_FETCH:
+            self._invalidate_incomplete_log()
+        unseen = (
+            partial(attribution.note_unseen, mac) if attribution is not None else None
+        )
+        new_entries = self._log_history.classify(mac, entries, on_unseen=unseen)
+        safe_entries = []
+        for entry in new_entries:
+            label = attribution.observe(mac, entry) if attribution is not None else None
+            safe = PublicLogRecord.from_entry(entry, label)
+            safe_entries.append(safe)
+            async_dispatcher_send(self._hass, log_signal(mac), safe)
+        return safe_entries
 
     async def _async_run_command(self, action: str) -> None:
         """Give explicit control priority over any read-only inventory task."""
@@ -674,6 +723,8 @@ class TtlockBleConnection:
                 self._inventory_task.cancel()
             if self._activity_state_task is not None:
                 self._activity_state_task.cancel()
+            if self._identification_log_task is not None:
+                self._identification_log_task.cancel()
             await self._async_run_control_command(action)
         finally:
             self._control_requests -= 1

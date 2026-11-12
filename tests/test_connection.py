@@ -54,6 +54,8 @@ def _log_entry(
     return SimpleNamespace(
         record_number=record_number,
         record_type=1,
+        lock_battery=90,
+        accessory_battery=None,
         operate_date=operate_date,
         uid=None,
         record_id=None,
@@ -3338,7 +3340,7 @@ async def test_full_initial_log_pages_are_all_seeded_without_events(
 
     assert await conn.async_get_operation_log() == []
     assert await conn.async_get_operation_log() == []
-    assert await conn.async_get_operation_log() == live_page
+    assert [e.record_number for e in await conn.async_get_operation_log()] == [31]
     await hass.async_block_till_done()
 
     assert [entry.record_number for entry in received] == [31]
@@ -3371,7 +3373,7 @@ async def test_short_page_then_later_historical_full_page_stays_suppressed(
 
     assert await conn.async_get_operation_log() == []
     assert await conn.async_get_operation_log() == []
-    assert await conn.async_get_operation_log() == [new_record]
+    assert [e.record_number for e in await conn.async_get_operation_log()] == [28]
     await hass.async_block_till_done()
 
     assert [entry.record_number for entry in received] == [28]

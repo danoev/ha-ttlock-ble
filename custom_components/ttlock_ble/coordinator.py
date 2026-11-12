@@ -507,7 +507,6 @@ class TtlockBleDataUpdateCoordinator(DataUpdateCoordinator["TtlockBleCoordinator
             LOGGER.debug(
                 "Operation log read failed for %s; keeping the state read",
                 connection.key.lockMac,
-                exc_info=True,
             )
 
     async def async_shutdown(self) -> None:
