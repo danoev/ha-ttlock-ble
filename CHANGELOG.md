@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.6.0 (unreleased)
+## 3.6.0rc1 (prerelease)
 
 - Add private exact credential matching and an administrator-guided verification
   flow for individual read-only inventory records. Hardware equivalence is
